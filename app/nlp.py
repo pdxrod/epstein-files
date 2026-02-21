@@ -2,6 +2,8 @@
 NLP and ML pipeline for document processing.
 
 Handles:
+- Query cleaning and normalisation
+- Generic fuzzy word variant generation
 - Named Entity Recognition (NER)
 - Topic classification and relevance scoring
 - Fuzzy name matching (misspelling tolerance)
@@ -10,6 +12,7 @@ Handles:
 """
 
 import hashlib
+import itertools
 import re
 from datetime import datetime
 
@@ -40,6 +43,157 @@ try:
 
 except ImportError:
     _get_nlp = None
+
+
+# ─── Query cleaning and generic fuzzy matching ──────────────────────────────
+
+def clean_query(query: str) -> str:
+    """
+    Clean a search query:
+    - Strip leading/trailing whitespace
+    - Strip wrapping quotes (single or double)
+    - Strip leading/trailing punctuation
+    - Collapse internal whitespace
+    """
+    q = query.strip()
+    # Strip matching outer quotes
+    if len(q) >= 2 and q[0] == q[-1] and q[0] in ('"', "'", "\u201c", "\u201d", "\u2018", "\u2019"):
+        q = q[1:-1].strip()
+    # Also handle mismatched curly quotes
+    if q.startswith(("\u201c", "\u201d", '"')) and q.endswith(("\u201c", "\u201d", '"')):
+        q = q[1:-1].strip()
+    if q.startswith(("\u2018", "\u2019", "'")) and q.endswith(("\u2018", "\u2019", "'")):
+        q = q[1:-1].strip()
+    # Strip leading/trailing punctuation (but keep internal)
+    q = re.sub(r"^[^\w]+", "", q)
+    q = re.sub(r"[^\w]+$", "", q)
+    # Collapse whitespace
+    q = re.sub(r"\s+", " ", q).strip()
+    return q
+
+
+def generate_fuzzy_variants(word: str, max_variants: int = 10) -> list[str]:
+    """
+    Generate plausible spelling variants of a single word using
+    edit-distance operations. Works for ANY word — not limited to a
+    predefined dictionary.
+
+    Returns variants in priority order:
+      1. Repeated-character collapse  ("Leee" → "Lee", "Le")
+      2. Phonetic substitutions       ("Goff" → "Groff", "f"↔"ph")
+      3. Adjacent transpositions      ("epstien" → "epstein")
+      4. Single-character deletions    ("Lees" → "Lee", "Les")
+      5. Single-character doublings    ("Les" → "Less", "Lees")
+    """
+    if len(word) <= 2:
+        return []
+
+    word_lower = word.lower()
+
+    # We collect variants in priority tiers so that the most likely
+    # corrections come first, regardless of fuzz.ratio score.
+    tier1 = set()  # collapsed repeated chars
+    tier2 = set()  # phonetic substitutions
+    tier3 = set()  # transpositions
+    tier4 = set()  # deletions
+    tier5 = set()  # doublings
+
+    # Tier 1: collapse repeated characters
+    collapsed = re.sub(r"(.)\1{2,}", r"\1\1", word_lower)
+    if collapsed != word_lower:
+        tier1.add(collapsed)
+    collapsed2 = re.sub(r"(.)\1+", r"\1", word_lower)
+    if collapsed2 != word_lower:
+        tier1.add(collapsed2)
+
+    # Tier 2: phonetic substitutions
+    _subs = [
+        ("ph", "f"), ("f", "ph"),
+        ("ey", "y"), ("y", "ey"), ("ie", "y"), ("y", "ie"),
+        ("ey", "ie"), ("ie", "ey"), ("ee", "ea"), ("ea", "ee"),
+        ("ei", "ie"), ("ie", "ei"),
+        ("c", "k"), ("k", "c"), ("ck", "k"), ("k", "ck"),
+        ("s", "z"), ("z", "s"),
+        ("sh", "sch"), ("sch", "sh"),
+        ("ff", "f"), ("f", "ff"),
+        ("ll", "l"), ("l", "ll"),
+        ("ss", "s"), ("s", "ss"),
+        ("tt", "t"), ("t", "tt"),
+        ("nn", "n"), ("n", "nn"),
+        ("oo", "o"), ("o", "oo"),
+    ]
+    for old, new in _subs:
+        idx = word_lower.find(old)
+        if idx != -1:
+            tier2.add(word_lower[:idx] + new + word_lower[idx + len(old):])
+
+    # Tier 3: adjacent transpositions (fixes swapped-letter typos)
+    for i in range(len(word_lower) - 1):
+        chars = list(word_lower)
+        chars[i], chars[i + 1] = chars[i + 1], chars[i]
+        t = "".join(chars)
+        if t != word_lower:
+            tier3.add(t)
+
+    # Tier 4: single-character deletions
+    for i in range(len(word_lower)):
+        v = word_lower[:i] + word_lower[i + 1:]
+        if len(v) >= 2:
+            tier4.add(v)
+
+    # Tier 5: double a single character (e.g. "Les" → "Lees", "Less")
+    for i, ch in enumerate(word_lower):
+        tier5.add(word_lower[:i] + ch + word_lower[i:])
+
+    # Merge tiers in priority order, deduplicating
+    result = []
+    seen = {word_lower}
+    for tier in [tier1, tier2, tier3, tier4, tier5]:
+        batch = sorted(tier - seen, key=lambda v: fuzz.ratio(word_lower, v), reverse=True)
+        for v in batch:
+            if v and v not in seen:
+                seen.add(v)
+                result.append(v)
+                if len(result) >= max_variants:
+                    return result
+
+    return result
+
+
+def generate_query_variants(query: str, max_total: int = 8) -> list[str]:
+    """
+    Given a multi-word query, generate variant queries by substituting
+    fuzzy variants of each word.  Returns a list of full query strings.
+
+    Varies each word in round-robin order so that the most likely
+    single-word corrections come first (e.g. "Nick Leee" → "Nick Lee"
+    before "Nik Leee").
+    """
+    words = query.strip().split()
+    if not words:
+        return []
+
+    per_word = [generate_fuzzy_variants(w, max_variants=6) for w in words]
+
+    results = [query]
+    seen = {query.lower()}
+
+    max_depth = max((len(v) for v in per_word), default=0)
+    for depth in range(max_depth):
+        for i, variants in enumerate(per_word):
+            if depth >= len(variants):
+                continue
+            new_words = list(words)
+            new_words[i] = variants[depth]
+            candidate = " ".join(new_words)
+            if candidate.lower() not in seen:
+                seen.add(candidate.lower())
+                results.append(candidate)
+                if len(results) >= max_total:
+                    return results
+
+    return results
+
 
 RELEVANCE_KEYWORDS = {
     "trafficking": [

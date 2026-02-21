@@ -21,7 +21,7 @@ from app.models import (
     Document, Entity, Category, Thread, NameVariant,
     document_entities, document_categories,
 )
-from app.nlp import resolve_name, FuzzySearcher, KNOWN_NAMES
+from app.nlp import resolve_name, clean_query, FuzzySearcher, KNOWN_NAMES
 
 
 def search_fulltext(query: str, page: int = 1, per_page: int = 25, filters: dict | None = None):
@@ -29,6 +29,7 @@ def search_fulltext(query: str, page: int = 1, per_page: int = 25, filters: dict
     Full-text search with FTS5 + fuzzy fallback.
     Returns paginated results ordered by relevance.
     """
+    query = clean_query(query)
     filters = filters or {}
     results = {"items": [], "total": 0, "page": page, "pages": 0, "query": query}
 
@@ -89,6 +90,7 @@ def search_fulltext(query: str, page: int = 1, per_page: int = 25, filters: dict
 
 def search_by_name(name: str, page: int = 1, per_page: int = 25):
     """Search for documents mentioning a person (fuzzy name matching)."""
+    name = clean_query(name)
     canonical = resolve_name(name)
 
     variants = NameVariant.query.filter_by(canonical=canonical).all()
@@ -384,23 +386,30 @@ def get_stats():
 
 
 def _build_fts_query(query: str) -> str:
-    """Build an FTS5 query with fuzzy matching support."""
-    query = query.strip()
-    if '"' in query:
-        return query
+    """
+    Build an FTS5 query.
 
+    Multi-word queries become NEAR phrases so that "nick lees" matches
+    the two words adjacent to each other (with any punctuation/whitespace)
+    but NOT "Nick ... Cathy Lees".
+
+    Single-word queries use prefix matching ("groff*").
+    """
+    query = clean_query(query)
     words = query.split()
+
+    if not words:
+        return '""'
+
     if len(words) == 1:
-        return f"{words[0]}*"
+        w = words[0]
+        return f"{w}*" if len(w) > 2 else w
 
-    parts = []
-    for word in words:
-        if len(word) <= 2:
-            parts.append(word)
-        else:
-            parts.append(f"{word}*")
-
-    return " OR ".join(parts)
+    # Multi-word: use NEAR with distance 0 (adjacent tokens only).
+    # FTS5 tokeniser already strips punctuation, so "Nick;  lees"
+    # becomes tokens [nick, lees] which are adjacent.
+    safe_words = [w for w in words if w]
+    return "NEAR(" + " ".join(safe_words) + ", 0)"
 
 
 def _fuzzy_search_fallback(query: str, page: int, per_page: int, filters: dict):

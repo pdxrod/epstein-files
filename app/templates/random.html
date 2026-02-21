@@ -12,11 +12,17 @@
     {% if documents %}
     <div class="results-list">
         {% for doc in documents %}
-        <article class="result-card result-card-interesting">
+        <article class="result-card result-card-interesting {% if doc.external %}result-card-external{% endif %}">
             <div class="result-header">
+                {% if doc.external %}
+                <a href="{{ doc.source_url or doc.jmail_url or '#' }}" target="_blank" rel="noopener" class="result-title">
+                    {{ doc.title or doc.file_id }}
+                </a>
+                {% else %}
                 <a href="{{ url_for('main.document_view', doc_id=doc.id) }}" class="result-title">
                     {{ doc.title or doc.file_id }}
                 </a>
+                {% endif %}
                 <div class="result-meta">
                     {% if doc.doc_type %}
                     <span class="badge badge-type">{{ doc.doc_type }}</span>
@@ -45,6 +51,12 @@
                 {% for cat in doc.categories %}
                 <span class="category-tag">{{ cat.name }}</span>
                 {% endfor %}
+            </div>
+            {% endif %}
+            {% if doc.external %}
+            <div class="result-links">
+                {% if doc.source_url %}<a href="{{ doc.source_url }}" target="_blank" rel="noopener">View PDF</a>{% endif %}
+                {% if doc.jmail_url %}<a href="{{ doc.jmail_url }}" target="_blank" rel="noopener">View on Jmail</a>{% endif %}
             </div>
             {% endif %}
         </article>

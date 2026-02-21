@@ -68,11 +68,25 @@
         </div>
     </form>
 
-    {% if search_type == 'name' and results.canonical_name %}
+    {% if results.resolved_name %}
+    <div class="search-info">
+        <p>You searched for <strong>"{{ query }}"</strong> — resolved to <strong>{{ results.resolved_name }}</strong></p>
+    </div>
+    {% elif search_type == 'name' and results.canonical_name %}
     <div class="search-info">
         <p>Searching for <strong>{{ results.canonical_name }}</strong>
         {% if results.searched_variants %}
             <span class="variant-info">(also checking: {{ results.searched_variants[:5] | join(', ') }}{% if results.searched_variants | length > 5 %} and {{ results.searched_variants | length - 5 }} more variants{% endif %})</span>
+        {% endif %}
+        </p>
+    </div>
+    {% endif %}
+
+    {% if results.external %}
+    <div class="search-info info-external">
+        <p>Results from <strong>Epstein Document Archive</strong> (epsteininvestigation.org) — 207K+ documents from DOJ, FBI, and House Oversight releases.
+        {% if not results.resolved_name and query %}
+        Searched for: <strong>"{{ results.get('query', query) }}"</strong>
         {% endif %}
         </p>
     </div>
@@ -91,14 +105,23 @@
 
     <div class="results-list">
         {% for doc in results['items'] %}
-        <article class="result-card">
+        <article class="result-card {% if doc.external %}result-card-external{% endif %}">
             <div class="result-header">
+                {% if doc.external %}
+                <a href="{{ doc.source_url or doc.jmail_url or '#' }}" target="_blank" rel="noopener" class="result-title">
+                    {{ doc.title or doc.file_id }}
+                </a>
+                {% else %}
                 <a href="{{ url_for('main.document_view', doc_id=doc.id) }}" class="result-title">
                     {{ doc.title or doc.file_id }}
                 </a>
+                {% endif %}
                 <div class="result-meta">
                     {% if doc.doc_type %}
                     <span class="badge badge-type">{{ doc.doc_type }}</span>
+                    {% endif %}
+                    {% if doc.external %}
+                    <span class="badge badge-external">LIVE</span>
                     {% endif %}
                     {% if doc.relevance_score and doc.relevance_score > 0.1 %}
                     <span class="badge badge-relevance badge-relevance-{{ 'high' if doc.relevance_score > 0.5 else 'medium' if doc.relevance_score > 0.2 else 'low' }}">
@@ -135,9 +158,17 @@
                 {% endfor %}
             </div>
             {% endif %}
-            {% if doc.source_url %}
-            <a href="{{ doc.source_url }}" target="_blank" rel="noopener" class="result-source">View original</a>
-            {% endif %}
+            <div class="result-links">
+                {% if doc.source_url %}
+                <a href="{{ doc.source_url }}" target="_blank" rel="noopener" class="result-source">View PDF</a>
+                {% endif %}
+                {% if doc.jmail_url %}
+                <a href="{{ doc.jmail_url }}" target="_blank" rel="noopener" class="result-source">View on Jmail</a>
+                {% endif %}
+                {% if doc.original_url %}
+                <a href="{{ doc.original_url }}" target="_blank" rel="noopener" class="result-source">DOJ Source</a>
+                {% endif %}
+            </div>
         </article>
         {% endfor %}
     </div>
@@ -158,10 +189,15 @@
     <div class="no-results">
         <h3>No results found for "{{ query }}"</h3>
         <p>Try a different spelling, broader search terms, or use the Name search for fuzzy matching.</p>
+        <p>You can also search directly on:
+            <a href="https://jmail.world" target="_blank" rel="noopener">jmail.world</a> or
+            <a href="https://www.justice.gov/epstein" target="_blank" rel="noopener">justice.gov/epstein</a>
+        </p>
     </div>
     {% else %}
     <div class="search-suggestions">
         <h3>Search suggestions</h3>
+        <p class="section-note">Searches 207K+ documents live. Handles misspellings — try "Lesly Goff" to find "Lesley Groff".</p>
         <div class="suggestion-grid">
             <a href="{{ url_for('main.search_page', q='Ghislaine Maxwell', type='name') }}" class="suggestion">Ghislaine Maxwell</a>
             <a href="{{ url_for('main.search_page', q='trafficking', type='fulltext') }}" class="suggestion">Trafficking</a>

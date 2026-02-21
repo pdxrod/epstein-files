@@ -4,14 +4,26 @@
 {% block content %}
 <section class="hero">
     <h1>Epstein Files Search</h1>
-    <p class="hero-subtitle">AI-powered search across {{ stats.total_documents | default(0) }} documents, emails, and records</p>
+    <p class="hero-subtitle">AI-powered search across 207,000+ documents, emails, and records</p>
 
     <form action="{{ url_for('main.search_page') }}" method="GET" class="hero-search">
-        <input type="text" name="q" placeholder="Search names, subjects, dates, keywords…"
+        <input type="text" name="q" placeholder="Search names, subjects, dates, keywords… (handles misspellings)"
                class="search-input-large" autofocus autocomplete="off">
         <button type="submit" class="btn btn-primary btn-large">Search</button>
     </form>
+    <p class="hero-note">Try "Lesly Goff" to find "Lesley Groff" — fuzzy matching handles Epstein's notorious misspellings</p>
 </section>
+
+{% if not has_data %}
+<div class="first-run-banner">
+    <h3>Live search is active</h3>
+    <p>Searching queries the <a href="https://www.epsteininvestigation.org" target="_blank" rel="noopener">Epstein Document Archive</a> API
+       (207K+ documents from DOJ, FBI, and House Oversight). Results link to original PDFs and
+       <a href="https://jmail.world" target="_blank" rel="noopener">jmail.world</a>.</p>
+    <p>For advanced features (entity extraction, email threading, deduplication, relevance scoring),
+       <a href="{{ url_for('main.admin_page') }}">ingest documents locally</a>.</p>
+</div>
+{% endif %}
 
 <section class="search-modes">
     <h2>Browse by</h2>

@@ -22,6 +22,6 @@ COPY . .
 
 RUN mkdir -p data/pdfs
 
-EXPOSE 5000
+EXPOSE 5555
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "120", "run:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5555", "--workers", "4", "--timeout", "120", "run:app"]

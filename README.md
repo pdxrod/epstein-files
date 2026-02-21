@@ -28,7 +28,7 @@ python -m spacy download en_core_web_sm
 # Run the app
 python run.py
 
-# Open http://localhost:5000
+# Open http://localhost:5555
 ```
 
 ## Ingesting Documents
@@ -61,7 +61,7 @@ sudo bash scripts/setup.sh
 This will:
 1. Install Docker and Docker Compose if not present
 2. Build the Docker image (Python 3.11 with all ML dependencies)
-3. Start the application on port 5000
+3. Start the application on port 5555
 
 ### Ingestion on the server
 

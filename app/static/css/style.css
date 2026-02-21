@@ -759,6 +759,130 @@ a:hover { color: var(--accent-hover); }
 
 .suggestion:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+/* ─── HERO NOTE ──────────────────────────────────────────── */
+
+.hero-note {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin-top: 12px;
+}
+
+/* ─── FIRST-RUN BANNER ───────────────────────────────────── */
+
+.first-run-banner {
+    background: rgba(74,125,255,0.08);
+    border: 1px solid rgba(74,125,255,0.3);
+    border-radius: var(--radius-lg);
+    padding: 24px 28px;
+    margin-bottom: 32px;
+}
+
+.first-run-banner h3 {
+    color: var(--accent);
+    margin: 0 0 8px;
+    font-size: 1.1rem;
+}
+
+.first-run-banner p {
+    color: var(--text-muted);
+    margin: 6px 0;
+    font-size: 0.9rem;
+}
+
+/* ─── EXTERNAL RESULTS ───────────────────────────────────── */
+
+.info-external {
+    border-color: rgba(74,125,255,0.3);
+    background: rgba(74,125,255,0.06);
+}
+
+.badge-external {
+    background: rgba(74,125,255,0.2);
+    color: var(--accent);
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+}
+
+.result-card-external {
+    border-left: 3px solid var(--accent);
+}
+
+.result-links {
+    display: flex;
+    gap: 16px;
+    margin-top: 12px;
+}
+
+.result-links a {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    transition: color var(--transition);
+}
+
+.result-links a:hover { color: var(--accent); }
+
+/* ─── FLIGHTS ────────────────────────────────────────────── */
+
+.flights-page { padding: 32px 0; }
+.flights-page h1 { color: var(--text-heading); }
+
+.flight-passengers {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.9rem;
+}
+
+/* ─── ADMIN ──────────────────────────────────────────────── */
+
+.admin-page { padding: 32px 0; }
+.admin-page h1 { color: var(--text-heading); }
+
+.admin-section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin: 24px 0;
+}
+
+.admin-section h2 { color: var(--text-heading); margin: 0 0 12px; font-size: 1.1rem; }
+.admin-section p { color: var(--text-muted); font-size: 0.9rem; margin: 8px 0; }
+
+.admin-code {
+    display: block;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin: 12px 0;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.88rem;
+    color: var(--accent);
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+    font-size: 0.9rem;
+}
+
+.admin-table th,
+.admin-table td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.admin-table th { color: var(--text-heading); font-weight: 600; }
+.admin-table td { color: var(--text-muted); }
+
+.badge-success { background: rgba(68,204,136,0.15); color: var(--success); }
+.badge-warning { background: rgba(255,170,0,0.15); color: var(--warning); }
+
 /* ─── RESPONSIVE ─────────────────────────────────────────── */
 
 @media (max-width: 768px) {
@@ -766,7 +890,7 @@ a:hover { color: var(--accent-hover); }
     .hero-search { flex-direction: column; }
     .mode-grid { grid-template-columns: 1fr; }
     .site-header .container { flex-direction: column; height: auto; padding: 12px 0; gap: 8px; }
-    .site-header nav { gap: 16px; }
+    .site-header nav { gap: 12px; flex-wrap: wrap; justify-content: center; }
     .result-header { flex-direction: column; }
     .date-search-row { flex-direction: column; }
     .filter-grid { grid-template-columns: 1fr; }

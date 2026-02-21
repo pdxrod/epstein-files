@@ -1,6 +1,11 @@
 """
 Flask routes: page views and JSON API.
+
+When the local database has no results for a query, automatically falls back
+to the public Epstein Files API at epsteininvestigation.org (207K+ documents).
 """
+
+import logging
 
 from flask import (
     Blueprint, render_template, request, jsonify, session,
@@ -13,7 +18,13 @@ from app.search import (
     get_interesting_documents, get_document_context, get_all_categories,
     get_all_entities, get_date_histogram, get_stats,
 )
+from app.live_search import (
+    search_external, search_external_documents, search_external_entities,
+    search_external_flights, get_external_document,
+)
 from app.models import Document, Category
+
+logger = logging.getLogger(__name__)
 
 main_bp = Blueprint("main", __name__)
 api_bp = Blueprint("api", __name__)
@@ -22,6 +33,38 @@ api_bp = Blueprint("api", __name__)
 def _age_verified():
     return session.get("age_verified", False)
 
+
+def _local_db_has_data():
+    return Document.query.filter_by(is_duplicate=False).count() > 0
+
+
+def _search_with_fallback(query, page, search_type, filters):
+    """Search local DB first; if empty, fall back to external API."""
+    results = {"items": [], "total": 0, "page": page, "pages": 0}
+
+    if search_type == "name":
+        results = search_by_name(query, page=page)
+    elif search_type == "date":
+        results = search_by_date(
+            start_date=filters.get("date_from"),
+            end_date=filters.get("date_to"),
+            page=page,
+        )
+    elif search_type == "category":
+        results = search_by_category(query, page=page)
+    else:
+        results = search_fulltext(query, page=page, filters=filters)
+
+    if not results.get("items"):
+        logger.info(f"No local results for '{query}', querying external API…")
+        ext = search_external(query, page=page)
+        if ext.get("items"):
+            return ext
+
+    return results
+
+
+# ─── Age gate ────────────────────────────────────────────────────────────────
 
 @main_bp.before_request
 def check_age_gate():
@@ -43,11 +86,14 @@ def verify_age():
     return redirect(url_for("main.age_gate"))
 
 
+# ─── Pages ───────────────────────────────────────────────────────────────────
+
 @main_bp.route("/")
 def index():
     stats = get_stats()
     categories = get_all_categories()
-    return render_template("index.html", stats=stats, categories=categories)
+    has_data = stats.get("total_documents", 0) > 0
+    return render_template("index.html", stats=stats, categories=categories, has_data=has_data)
 
 
 @main_bp.route("/search")
@@ -67,19 +113,7 @@ def search_page():
             "date_to": request.args.get("date_to"),
         }
         filters = {k: v for k, v in filters.items() if v}
-
-        if search_type == "name":
-            results = search_by_name(query, page=page)
-        elif search_type == "date":
-            results = search_by_date(
-                start_date=request.args.get("date_from"),
-                end_date=request.args.get("date_to"),
-                page=page,
-            )
-        elif search_type == "category":
-            results = search_by_category(query, page=page)
-        else:
-            results = search_fulltext(query, page=page, filters=filters)
+        results = _search_with_fallback(query, page, search_type, filters)
 
     categories = get_all_categories()
     return render_template(
@@ -99,16 +133,44 @@ def document_view(doc_id):
     return render_template("document.html", context=context)
 
 
+@main_bp.route("/external/<slug>")
+def external_document_view(slug):
+    """View a document fetched live from the external API."""
+    doc = get_external_document(slug)
+    if not doc:
+        abort(404)
+    context = {
+        "document": doc,
+        "full_body": doc.get("body", ""),
+        "thread": None,
+        "related_documents": [],
+        "timeline": [],
+        "entities": [],
+        "categories": [],
+        "external": True,
+    }
+    return render_template("document.html", context=context)
+
+
 @main_bp.route("/category/<slug>")
 def category_view(slug):
     page = request.args.get("page", 1, type=int)
     results = search_by_category(slug, page=page)
+
+    if not results.get("items"):
+        ext = search_external_documents(slug, page=page)
+        if ext.get("items"):
+            results = ext
+
     return render_template("category.html", results=results, slug=slug)
 
 
 @main_bp.route("/random")
 def random_page():
     docs = get_interesting_documents(count=20)
+    if not docs:
+        ext = search_external("epstein victim trafficking", page=1, limit=20)
+        docs = ext.get("items", [])
     return render_template("random.html", documents=docs)
 
 
@@ -122,7 +184,50 @@ def timeline_page():
 def people_page():
     page = request.args.get("page", 1, type=int)
     entities = get_all_entities(entity_type="PERSON", page=page, per_page=100)
+
+    if not entities.get("items"):
+        ext = search_external_entities("", entity_type="person", page=page)
+        if ext.get("items"):
+            entities = {
+                "items": [
+                    {
+                        "id": e.get("id"),
+                        "name": e.get("name"),
+                        "canonical_name": e.get("name"),
+                        "entity_type": "PERSON",
+                        "mention_count": e.get("document_count", 0),
+                    }
+                    for e in ext["items"]
+                ],
+                "total": ext.get("total", 0),
+                "page": page,
+                "pages": ext.get("pages", 0),
+                "external": True,
+            }
+
     return render_template("people.html", entities=entities)
+
+
+@main_bp.route("/flights")
+def flights_page():
+    passenger = request.args.get("passenger", "")
+    airport = request.args.get("airport", "")
+    page = request.args.get("page", 1, type=int)
+
+    results = search_external_flights(
+        passenger=passenger or None,
+        airport=airport or None,
+        page=page,
+    )
+    return render_template("flights.html", results=results, passenger=passenger, airport=airport)
+
+
+@main_bp.route("/admin")
+def admin_page():
+    stats = get_stats()
+    from app.models import IngestJob
+    jobs = IngestJob.query.order_by(IngestJob.id.desc()).limit(20).all()
+    return render_template("admin.html", stats=stats, jobs=jobs)
 
 
 # ─── JSON API ────────────────────────────────────────────────────────────────
@@ -149,7 +254,8 @@ def api_search():
     }
     filters = {k: v for k, v in filters.items() if v}
 
-    return jsonify(search_fulltext(query, page=page, filters=filters))
+    results = _search_with_fallback(query, page, "fulltext", filters)
+    return jsonify(results)
 
 
 @api_bp.route("/search/name")
@@ -158,7 +264,13 @@ def api_search_name():
     page = request.args.get("page", 1, type=int)
     if not name:
         return jsonify({"error": "Query parameter 'q' is required"}), 400
-    return jsonify(search_by_name(name, page=page))
+
+    results = search_by_name(name, page=page)
+    if not results.get("items"):
+        ext = search_external(name, page=page)
+        if ext.get("items"):
+            return jsonify(ext)
+    return jsonify(results)
 
 
 @api_bp.route("/search/date")
@@ -190,7 +302,11 @@ def api_document(doc_id):
 @api_bp.route("/random")
 def api_random():
     count = request.args.get("count", 20, type=int)
-    return jsonify(get_interesting_documents(count=min(count, 50)))
+    docs = get_interesting_documents(count=min(count, 50))
+    if not docs:
+        ext = search_external("epstein victim trafficking", limit=count)
+        return jsonify(ext.get("items", []))
+    return jsonify(docs)
 
 
 @api_bp.route("/categories")
@@ -213,6 +329,35 @@ def api_timeline():
 @api_bp.route("/stats")
 def api_stats():
     return jsonify(get_stats())
+
+
+@api_bp.route("/external/search")
+def api_external_search():
+    """Search external API directly."""
+    query = request.args.get("q", "").strip()
+    page = request.args.get("page", 1, type=int)
+    if not query:
+        return jsonify({"error": "Query parameter 'q' is required"}), 400
+    return jsonify(search_external(query, page=page))
+
+
+@api_bp.route("/external/entities")
+def api_external_entities():
+    query = request.args.get("q", "")
+    entity_type = request.args.get("type")
+    page = request.args.get("page", 1, type=int)
+    return jsonify(search_external_entities(query, entity_type=entity_type, page=page))
+
+
+@api_bp.route("/external/flights")
+def api_external_flights():
+    return jsonify(search_external_flights(
+        passenger=request.args.get("passenger"),
+        airport=request.args.get("airport"),
+        date_from=request.args.get("date_from"),
+        date_to=request.args.get("date_to"),
+        page=request.args.get("page", 1, type=int),
+    ))
 
 
 @api_bp.route("/ingest", methods=["POST"])
