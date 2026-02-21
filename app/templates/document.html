@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}{{ context.document.title or context.document.file_id }} — Epstein Files{% endblock %}
+
+{% block content %}
+<article class="document-view">
+    <div class="document-header">
+        <h1>{{ context.document.title or context.document.file_id }}</h1>
+        <div class="document-meta-bar">
+            {% if context.document.doc_type %}
+            <span class="badge badge-type">{{ context.document.doc_type }}</span>
+            {% endif %}
+            {% if context.document.relevance_score and context.document.relevance_score > 0.1 %}
+            <span class="badge badge-relevance badge-relevance-{{ 'high' if context.document.relevance_score > 0.5 else 'medium' }}">
+                Relevance: {{ '%.0f' | format(context.document.relevance_score * 100) }}%
+            </span>
+            {% endif %}
+            {% if context.document.date %}
+            <span class="document-date">{{ context.document.date[:10] }}</span>
+            {% endif %}
+            {% if context.document.source_url %}
+            <a href="{{ context.document.source_url }}" target="_blank" rel="noopener" class="btn btn-small">View Original</a>
+            {% endif %}
+            {% if context.document.original_url %}
+            <a href="{{ context.document.original_url }}" target="_blank" rel="noopener" class="btn btn-small">DOJ Source</a>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if context.document.sender or context.document.recipients %}
+    <div class="email-headers">
+        {% if context.document.sender %}
+        <div class="email-header-row">
+            <strong>From:</strong>
+            <a href="{{ url_for('main.search_page', q=context.document.sender, type='name') }}">{{ context.document.sender }}</a>
+            {% if context.document.sender_email %}
+            <span class="email-address">&lt;{{ context.document.sender_email }}&gt;</span>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% if context.document.recipients %}
+        <div class="email-header-row">
+            <strong>To:</strong> {{ context.document.recipients }}
+        </div>
+        {% endif %}
+        {% if context.document.subject %}
+        <div class="email-header-row">
+            <strong>Subject:</strong> {{ context.document.subject }}
+        </div>
+        {% endif %}
+        {% if context.document.date_str %}
+        <div class="email-header-row">
+            <strong>Date:</strong> {{ context.document.date_str }}
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="document-body">
+        <h2>Content</h2>
+        <div class="document-text">{{ context.full_body | e | replace('\n', '<br>') | safe }}</div>
+    </div>
+
+    {% if context.entities %}
+    <div class="document-sidebar-section">
+        <h3>People &amp; Entities Mentioned</h3>
+        <div class="entity-list">
+            {% for ent in context.entities %}
+            <a href="{{ url_for('main.search_page', q=ent.canonical_name or ent.name, type='name') }}"
+               class="entity-tag entity-{{ ent.entity_type | lower }}">
+                {{ ent.canonical_name or ent.name }}
+                <span class="entity-type-label">{{ ent.entity_type }}</span>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if context.categories %}
+    <div class="document-sidebar-section">
+        <h3>Categories</h3>
+        <div class="category-list">
+            {% for cat in context.categories %}
+            <a href="{{ url_for('main.category_view', slug=cat.slug) }}" class="category-tag">{{ cat.name }}</a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if context.thread %}
+    <section class="thread-section">
+        <h2>Email Thread: {{ context.thread.subject }}</h2>
+        <p class="thread-info">
+            {{ context.thread.message_count }} messages
+            {% if context.thread.first_date %} · {{ context.thread.first_date[:10] }} to {{ context.thread.last_date[:10] }}{% endif %}
+        </p>
+        {% if context.thread.participants %}
+        <p class="thread-participants"><strong>Participants:</strong> {{ context.thread.participants }}</p>
+        {% endif %}
+        <div class="thread-messages">
+            {% for msg in context.thread.messages %}
+            <div class="thread-message {{ 'thread-message-current' if msg.id == context.document.id }}">
+                <div class="thread-message-header">
+                    <span class="thread-message-num">#{{ loop.index }}</span>
+                    {% if msg.sender %}
+                    <strong>{{ msg.sender }}</strong>
+                    {% endif %}
+                    {% if msg.date %}
+                    <span class="thread-message-date">{{ msg.date[:16] }}</span>
+                    {% endif %}
+                </div>
+                <a href="{{ url_for('main.document_view', doc_id=msg.id) }}">{{ msg.title or msg.file_id }}</a>
+                {% if msg.body %}
+                <p class="thread-message-preview">{{ msg.body[:200] }}…</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {% if context.related_documents %}
+    <section class="related-section">
+        <h2>Related Documents</h2>
+        <p class="section-note">Documents sharing people, places, or topics with this one.</p>
+        <div class="related-list">
+            {% for rdoc in context.related_documents %}
+            <a href="{{ url_for('main.document_view', doc_id=rdoc.id) }}" class="related-card">
+                <div class="related-title">{{ rdoc.title or rdoc.file_id }}</div>
+                <div class="related-meta">
+                    {% if rdoc.date %}<span>{{ rdoc.date[:10] }}</span>{% endif %}
+                    {% if rdoc.doc_type %}<span class="badge badge-type">{{ rdoc.doc_type }}</span>{% endif %}
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {% if context.timeline %}
+    <section class="timeline-section">
+        <h2>Timeline Context</h2>
+        <p class="section-note">Other documents from around the same time period (±30 days).</p>
+        <div class="timeline-list">
+            {% for tdoc in context.timeline %}
+            <div class="timeline-item">
+                <span class="timeline-date">{{ tdoc.date[:10] if tdoc.date else '?' }}</span>
+                <a href="{{ url_for('main.document_view', doc_id=tdoc.id) }}">{{ tdoc.title or tdoc.file_id }}</a>
+                {% if tdoc.doc_type %}<span class="badge badge-type badge-small">{{ tdoc.doc_type }}</span>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+</article>
+{% endblock %}

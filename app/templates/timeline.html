@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Timeline — Epstein Files{% endblock %}
+
+{% block content %}
+<section class="timeline-page">
+    <h1>Document Timeline</h1>
+    <p class="section-description">Browse documents by date. Click a month to see all documents from that period.</p>
+
+    <form action="{{ url_for('main.search_page') }}" method="GET" class="date-search-form">
+        <input type="hidden" name="type" value="date">
+        <div class="date-search-row">
+            <div class="filter-group">
+                <label>From</label>
+                <input type="date" name="date_from" class="date-input">
+            </div>
+            <div class="filter-group">
+                <label>To</label>
+                <input type="date" name="date_to" class="date-input">
+            </div>
+            <button type="submit" class="btn btn-primary">Search Date Range</button>
+        </div>
+    </form>
+
+    {% if histogram %}
+    <div class="timeline-chart" id="timeline-chart">
+        {% for item in histogram %}
+        <a href="{{ url_for('main.search_page', type='date', date_from=item.month + '-01', date_to=item.month + '-28') }}"
+           class="timeline-bar-link">
+            <div class="timeline-bar" style="--bar-height: {{ [item.count / (histogram | map(attribute='count') | max) * 200, 4] | max }}px"
+                 title="{{ item.month }}: {{ item.count }} documents">
+            </div>
+            <span class="timeline-bar-label">{{ item.month }}</span>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="no-results">
+        <p>No dated documents available yet.</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ results.category.name if results.category else slug }} — Epstein Files{% endblock %}
+
+{% block content %}
+<section class="category-section">
+    {% if results.category %}
+    <h1>{{ results.category.name }}</h1>
+    {% if results.category.description %}
+    <p class="section-description">{{ results.category.description }}</p>
+    {% endif %}
+    {% else %}
+    <h1>Category: {{ slug }}</h1>
+    {% endif %}
+
+    <p class="results-count">{{ results.total }} document{{ 's' if results.total != 1 }}</p>
+
+    {% if results['items'] %}
+    <div class="results-list">
+        {% for doc in results['items'] %}
+        <article class="result-card">
+            <div class="result-header">
+                <a href="{{ url_for('main.document_view', doc_id=doc.id) }}" class="result-title">
+                    {{ doc.title or doc.file_id }}
+                </a>
+                <div class="result-meta">
+                    {% if doc.doc_type %}
+                    <span class="badge badge-type">{{ doc.doc_type }}</span>
+                    {% endif %}
+                    {% if doc.relevance_score and doc.relevance_score > 0.1 %}
+                    <span class="badge badge-relevance">{{ '%.0f' | format(doc.relevance_score * 100) }}%</span>
+                    {% endif %}
+                    {% if doc.date %}
+                    <span class="result-date">{{ doc.date[:10] }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% if doc.body %}
+            <p class="result-snippet">{{ doc.body[:300] }}{% if doc.body | length > 300 %}…{% endif %}</p>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+
+    {% if results.pages > 1 %}
+    <nav class="pagination">
+        {% if results.page > 1 %}
+        <a href="{{ url_for('main.category_view', slug=slug, page=results.page - 1) }}" class="btn btn-secondary">&larr; Previous</a>
+        {% endif %}
+        <span class="page-info">Page {{ results.page }} of {{ results.pages }}</span>
+        {% if results.page < results.pages %}
+        <a href="{{ url_for('main.category_view', slug=slug, page=results.page + 1) }}" class="btn btn-secondary">Next &rarr;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+    {% else %}
+    <div class="no-results">
+        <p>No documents in this category yet. Run ingestion to populate.</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

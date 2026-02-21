@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}People — Epstein Files{% endblock %}
+
+{% block content %}
+<section class="people-page">
+    <h1>People</h1>
+    <p class="section-description">
+        Named individuals mentioned across the archive, ranked by frequency.
+        Click a name to find all related documents.
+    </p>
+
+    {% if entities['items'] %}
+    <div class="people-grid">
+        {% for ent in entities['items'] %}
+        <a href="{{ url_for('main.search_page', q=ent.canonical_name or ent.name, type='name') }}"
+           class="person-card">
+            <div class="person-name">{{ ent.canonical_name or ent.name }}</div>
+            <div class="person-mentions">{{ ent.mention_count }} mention{{ 's' if ent.mention_count != 1 }}</div>
+        </a>
+        {% endfor %}
+    </div>
+
+    {% if entities.pages > 1 %}
+    <nav class="pagination">
+        {% if entities.page > 1 %}
+        <a href="{{ url_for('main.people_page', page=entities.page - 1) }}" class="btn btn-secondary">&larr; Previous</a>
+        {% endif %}
+        <span class="page-info">Page {{ entities.page }} of {{ entities.pages }}</span>
+        {% if entities.page < entities.pages %}
+        <a href="{{ url_for('main.people_page', page=entities.page + 1) }}" class="btn btn-secondary">Next &rarr;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+    {% else %}
+    <div class="no-results">
+        <p>No entities extracted yet. Run ingestion to populate.</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

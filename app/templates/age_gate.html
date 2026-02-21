@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Age Verification — Epstein Files Search</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="age-gate-body">
+    <div class="age-gate">
+        <div class="age-gate-card">
+            <h1>Epstein Files Search</h1>
+            <div class="age-gate-warning">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/>
+                    <line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                <h2>Content Warning</h2>
+                <p>This archive contains documents related to serious criminal activity including
+                   sexual abuse, trafficking, and exploitation. Some content is disturbing.</p>
+                <p>These are public records released by the U.S. Department of Justice and
+                   congressional committees for the purpose of transparency and accountability.</p>
+            </div>
+            <div class="age-gate-question">
+                <p><strong>Are you 18 years of age or older?</strong></p>
+                <form method="POST" action="{{ url_for('main.verify_age') }}">
+                    <div class="age-gate-buttons">
+                        <button type="submit" name="age_confirmed" value="yes" class="btn btn-yes">
+                            Yes, I am 18 or older
+                        </button>
+                        <a href="https://www.google.com" class="btn btn-no">
+                            No, take me away
+                        </a>
+                    </div>
+                </form>
+            </div>
+            <p class="age-gate-note">
+                Sources:
+                <a href="https://www.justice.gov/epstein" target="_blank">justice.gov/epstein</a> ·
+                <a href="https://jmail.world" target="_blank">jmail.world</a>
+            </p>
+        </div>
+    </div>
+</body>
+</html>

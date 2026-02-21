@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Epstein Files Search{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    {% block body %}
+    <header class="site-header">
+        <div class="container">
+            <a href="{{ url_for('main.index') }}" class="logo">Epstein Files Search</a>
+            <nav>
+                <a href="{{ url_for('main.index') }}">Home</a>
+                <a href="{{ url_for('main.search_page') }}">Search</a>
+                <a href="{{ url_for('main.people_page') }}">People</a>
+                <a href="{{ url_for('main.timeline_page') }}">Timeline</a>
+                <a href="{{ url_for('main.random_page') }}">Interesting Docs</a>
+            </nav>
+        </div>
+    </header>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="site-footer">
+        <div class="container">
+            <p>This is a research tool. Original documents sourced from
+                <a href="https://www.justice.gov/epstein" target="_blank" rel="noopener">DOJ</a> and
+                <a href="https://jmail.world" target="_blank" rel="noopener">Jmail Archive</a>.
+            </p>
+            <p class="disclaimer">
+                Content may be disturbing. All documents are public records.
+                This tool does not host original files; it indexes and links to official sources.
+            </p>
+        </div>
+    </footer>
+    {% endblock %}
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

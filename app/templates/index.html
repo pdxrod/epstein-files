@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Epstein Files Search — Home{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <h1>Epstein Files Search</h1>
+    <p class="hero-subtitle">AI-powered search across {{ stats.total_documents | default(0) }} documents, emails, and records</p>
+
+    <form action="{{ url_for('main.search_page') }}" method="GET" class="hero-search">
+        <input type="text" name="q" placeholder="Search names, subjects, dates, keywords…"
+               class="search-input-large" autofocus autocomplete="off">
+        <button type="submit" class="btn btn-primary btn-large">Search</button>
+    </form>
+</section>
+
+<section class="search-modes">
+    <h2>Browse by</h2>
+    <div class="mode-grid">
+        <a href="{{ url_for('main.search_page', type='name') }}" class="mode-card">
+            <div class="mode-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+            </div>
+            <h3>Search by Name</h3>
+            <p>Find documents mentioning any person — handles misspellings and name variations</p>
+        </a>
+
+        <a href="{{ url_for('main.timeline_page') }}" class="mode-card">
+            <div class="mode-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                    <line x1="16" y1="2" x2="16" y2="6"/>
+                    <line x1="8" y1="2" x2="8" y2="6"/>
+                    <line x1="3" y1="10" x2="21" y2="10"/>
+                </svg>
+            </div>
+            <h3>Search by Date</h3>
+            <p>Explore the chronological timeline of documents, emails, and events</p>
+        </a>
+
+        <a href="#categories" class="mode-card">
+            <div class="mode-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+            </div>
+            <h3>Search by Category</h3>
+            <p>Browse documents grouped by topic: trafficking, financial crime, intelligence, and more</p>
+        </a>
+
+        <a href="{{ url_for('main.random_page') }}" class="mode-card mode-card-highlight">
+            <div class="mode-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+            </div>
+            <h3>Random Interesting Documents</h3>
+            <p>Discover high-relevance documents you might otherwise never find</p>
+        </a>
+    </div>
+</section>
+
+<section class="categories-section" id="categories">
+    <h2>Categories</h2>
+    <div class="category-grid">
+        {% for cat in categories %}
+        <a href="{{ url_for('main.category_view', slug=cat.slug) }}" class="category-card">
+            <h4>{{ cat.name }}</h4>
+            <span class="badge">{{ cat.document_count | default(0) }} docs</span>
+            {% if cat.description %}
+            <p>{{ cat.description }}</p>
+            {% endif %}
+        </a>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="stats-section">
+    <h2>Archive Statistics</h2>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-number">{{ stats.total_documents | default(0) | int }}</div>
+            <div class="stat-label">Documents</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ stats.total_emails | default(0) | int }}</div>
+            <div class="stat-label">Emails</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ stats.total_entities | default(0) | int }}</div>
+            <div class="stat-label">Named Entities</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ stats.total_threads | default(0) | int }}</div>
+            <div class="stat-label">Email Threads</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ stats.high_relevance | default(0) | int }}</div>
+            <div class="stat-label">High-Relevance Docs</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ stats.total_duplicates | default(0) | int }}</div>
+            <div class="stat-label">Duplicates Removed</div>
+        </div>
+    </div>
+</section>
+{% endblock %}

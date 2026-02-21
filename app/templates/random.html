@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Interesting Documents — Epstein Files{% endblock %}
+
+{% block content %}
+<section class="random-section">
+    <h1>Random Interesting Documents</h1>
+    <p class="section-description">
+        AI-selected documents scored for relevance to matters of public interest.
+        <a href="{{ url_for('main.random_page') }}" class="btn btn-secondary btn-small">Refresh</a>
+    </p>
+
+    {% if documents %}
+    <div class="results-list">
+        {% for doc in documents %}
+        <article class="result-card result-card-interesting">
+            <div class="result-header">
+                <a href="{{ url_for('main.document_view', doc_id=doc.id) }}" class="result-title">
+                    {{ doc.title or doc.file_id }}
+                </a>
+                <div class="result-meta">
+                    {% if doc.doc_type %}
+                    <span class="badge badge-type">{{ doc.doc_type }}</span>
+                    {% endif %}
+                    {% if doc.relevance_score %}
+                    <span class="badge badge-relevance badge-relevance-{{ 'high' if doc.relevance_score > 0.5 else 'medium' }}">
+                        Relevance: {{ '%.0f' | format(doc.relevance_score * 100) }}%
+                    </span>
+                    {% endif %}
+                    {% if doc.date %}
+                    <span class="result-date">{{ doc.date[:10] }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% if doc.sender %}
+            <div class="result-email-meta">
+                <span><strong>From:</strong> {{ doc.sender }}</span>
+                {% if doc.recipients %}<span><strong>To:</strong> {{ doc.recipients }}</span>{% endif %}
+            </div>
+            {% endif %}
+            {% if doc.body %}
+            <p class="result-snippet">{{ doc.body[:400] }}{% if doc.body | length > 400 %}…{% endif %}</p>
+            {% endif %}
+            {% if doc.categories %}
+            <div class="result-categories">
+                {% for cat in doc.categories %}
+                <span class="category-tag">{{ cat.name }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="no-results">
+        <p>No documents available yet. Run ingestion to populate the archive.</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

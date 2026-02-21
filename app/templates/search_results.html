@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Search: {{ query }} — Epstein Files{% endblock %}
+
+{% block content %}
+<section class="search-section">
+    <h1>Search</h1>
+
+    <form action="{{ url_for('main.search_page') }}" method="GET" class="search-form">
+        <div class="search-bar">
+            <input type="text" name="q" value="{{ query }}" placeholder="Search names, subjects, dates, keywords…"
+                   class="search-input-large" autofocus autocomplete="off">
+            <button type="submit" class="btn btn-primary">Search</button>
+        </div>
+
+        <div class="search-options">
+            <label class="search-type-option">
+                <input type="radio" name="type" value="fulltext" {{ 'checked' if search_type == 'fulltext' }}>
+                Full Text
+            </label>
+            <label class="search-type-option">
+                <input type="radio" name="type" value="name" {{ 'checked' if search_type == 'name' }}>
+                By Name
+            </label>
+            <label class="search-type-option">
+                <input type="radio" name="type" value="date" {{ 'checked' if search_type == 'date' }}>
+                By Date
+            </label>
+            <label class="search-type-option">
+                <input type="radio" name="type" value="category" {{ 'checked' if search_type == 'category' }}>
+                By Category
+            </label>
+        </div>
+
+        <div class="search-filters" id="filters">
+            <details>
+                <summary>Filters</summary>
+                <div class="filter-grid">
+                    <div class="filter-group">
+                        <label>Document Type</label>
+                        <select name="doc_type">
+                            <option value="">All Types</option>
+                            <option value="email">Emails</option>
+                            <option value="legal">Legal Documents</option>
+                            <option value="flight_log">Flight Logs</option>
+                            <option value="document">Other Documents</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Minimum Relevance</label>
+                        <select name="min_relevance">
+                            <option value="">Any</option>
+                            <option value="0.1">Low+</option>
+                            <option value="0.3">Medium+</option>
+                            <option value="0.5">High+</option>
+                            <option value="0.7">Very High</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Date From</label>
+                        <input type="date" name="date_from">
+                    </div>
+                    <div class="filter-group">
+                        <label>Date To</label>
+                        <input type="date" name="date_to">
+                    </div>
+                </div>
+            </details>
+        </div>
+    </form>
+
+    {% if search_type == 'name' and results.canonical_name %}
+    <div class="search-info">
+        <p>Searching for <strong>{{ results.canonical_name }}</strong>
+        {% if results.searched_variants %}
+            <span class="variant-info">(also checking: {{ results.searched_variants[:5] | join(', ') }}{% if results.searched_variants | length > 5 %} and {{ results.searched_variants | length - 5 }} more variants{% endif %})</span>
+        {% endif %}
+        </p>
+    </div>
+    {% endif %}
+
+    {% if results.fuzzy_fallback %}
+    <div class="search-info info-warning">
+        <p>No exact matches found. Showing fuzzy results instead.</p>
+    </div>
+    {% endif %}
+
+    {% if results['items'] %}
+    <div class="results-header">
+        <p class="results-count">{{ results.total }} result{{ 's' if results.total != 1 }} found</p>
+    </div>
+
+    <div class="results-list">
+        {% for doc in results['items'] %}
+        <article class="result-card">
+            <div class="result-header">
+                <a href="{{ url_for('main.document_view', doc_id=doc.id) }}" class="result-title">
+                    {{ doc.title or doc.file_id }}
+                </a>
+                <div class="result-meta">
+                    {% if doc.doc_type %}
+                    <span class="badge badge-type">{{ doc.doc_type }}</span>
+                    {% endif %}
+                    {% if doc.relevance_score and doc.relevance_score > 0.1 %}
+                    <span class="badge badge-relevance badge-relevance-{{ 'high' if doc.relevance_score > 0.5 else 'medium' if doc.relevance_score > 0.2 else 'low' }}">
+                        relevance: {{ '%.0f' | format(doc.relevance_score * 100) }}%
+                    </span>
+                    {% endif %}
+                    {% if doc.date %}
+                    <span class="result-date">{{ doc.date[:10] }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% if doc.sender or doc.recipients %}
+            <div class="result-email-meta">
+                {% if doc.sender %}<span><strong>From:</strong> {{ doc.sender }}</span>{% endif %}
+                {% if doc.recipients %}<span><strong>To:</strong> {{ doc.recipients }}</span>{% endif %}
+                {% if doc.subject %}<span><strong>Subject:</strong> {{ doc.subject }}</span>{% endif %}
+            </div>
+            {% endif %}
+            {% if doc.body %}
+            <p class="result-snippet">{{ doc.body[:300] }}{% if doc.body | length > 300 %}…{% endif %}</p>
+            {% endif %}
+            {% if doc.entities %}
+            <div class="result-entities">
+                {% for ent in doc.entities[:8] %}
+                <a href="{{ url_for('main.search_page', q=ent.canonical_name or ent.name, type='name') }}"
+                   class="entity-tag entity-{{ ent.entity_type | lower }}">{{ ent.canonical_name or ent.name }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if doc.categories %}
+            <div class="result-categories">
+                {% for cat in doc.categories %}
+                <a href="{{ url_for('main.category_view', slug=cat.slug) }}" class="category-tag">{{ cat.name }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if doc.source_url %}
+            <a href="{{ doc.source_url }}" target="_blank" rel="noopener" class="result-source">View original</a>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+
+    {% if results.pages > 1 %}
+    <nav class="pagination">
+        {% if results.page > 1 %}
+        <a href="{{ url_for('main.search_page', q=query, type=search_type, page=results.page - 1) }}" class="btn btn-secondary">&larr; Previous</a>
+        {% endif %}
+        <span class="page-info">Page {{ results.page }} of {{ results.pages }}</span>
+        {% if results.page < results.pages %}
+        <a href="{{ url_for('main.search_page', q=query, type=search_type, page=results.page + 1) }}" class="btn btn-secondary">Next &rarr;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+
+    {% elif query %}
+    <div class="no-results">
+        <h3>No results found for "{{ query }}"</h3>
+        <p>Try a different spelling, broader search terms, or use the Name search for fuzzy matching.</p>
+    </div>
+    {% else %}
+    <div class="search-suggestions">
+        <h3>Search suggestions</h3>
+        <div class="suggestion-grid">
+            <a href="{{ url_for('main.search_page', q='Ghislaine Maxwell', type='name') }}" class="suggestion">Ghislaine Maxwell</a>
+            <a href="{{ url_for('main.search_page', q='trafficking', type='fulltext') }}" class="suggestion">Trafficking</a>
+            <a href="{{ url_for('main.search_page', q='flight log', type='fulltext') }}" class="suggestion">Flight Logs</a>
+            <a href="{{ url_for('main.search_page', q='Prince Andrew', type='name') }}" class="suggestion">Prince Andrew</a>
+            <a href="{{ url_for('main.search_page', q='Palm Beach', type='fulltext') }}" class="suggestion">Palm Beach</a>
+            <a href="{{ url_for('main.search_page', q='Lesley Groff', type='name') }}" class="suggestion">Lesley Groff</a>
+            <a href="{{ url_for('main.search_page', q='deposition', type='fulltext') }}" class="suggestion">Depositions</a>
+            <a href="{{ url_for('main.search_page', q='Little St James', type='fulltext') }}" class="suggestion">Little St. James</a>
+        </div>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
