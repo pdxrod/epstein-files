@@ -55,6 +55,9 @@ class Document(db.Model):
     volume = db.Column(db.String(50))
     folder = db.Column(db.String(200))
 
+    ai_summary = db.Column(db.Text)
+    ai_connections = db.Column(db.Text)
+
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     processed = db.Column(db.Boolean, default=False, index=True)
 
@@ -169,6 +172,61 @@ class NameVariant(db.Model):
     similarity_score = db.Column(db.Float)
 
     __table_args__ = (db.UniqueConstraint("variant", "canonical"),)
+
+
+class EntityRelationship(db.Model):
+    """Tracks connections between entities (from epsteininvestigation.org graph)."""
+    __tablename__ = "entity_relationships"
+
+    id = db.Column(db.Integer, primary_key=True)
+    entity_a_id = db.Column(db.Integer, db.ForeignKey("entities.id"), index=True)
+    entity_b_id = db.Column(db.Integer, db.ForeignKey("entities.id"), index=True)
+    relationship_type = db.Column(db.String(100))
+    strength = db.Column(db.Float, default=0.0)
+    source = db.Column(db.String(100))
+
+    entity_a = db.relationship("Entity", foreign_keys=[entity_a_id])
+    entity_b = db.relationship("Entity", foreign_keys=[entity_b_id])
+
+    __table_args__ = (db.UniqueConstraint("entity_a_id", "entity_b_id", "relationship_type"),)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "entity_a": self.entity_a.name if self.entity_a else None,
+            "entity_b": self.entity_b.name if self.entity_b else None,
+            "relationship_type": self.relationship_type,
+            "strength": self.strength,
+        }
+
+
+class FlightRecord(db.Model):
+    """Flight log entries from Lolita Express and associated aircraft."""
+    __tablename__ = "flight_records"
+
+    id = db.Column(db.Integer, primary_key=True)
+    flight_date = db.Column(db.DateTime, index=True)
+    flight_date_str = db.Column(db.String(100))
+    aircraft_tail = db.Column(db.String(50))
+    pilot = db.Column(db.String(200))
+    departure_code = db.Column(db.String(10))
+    departure_airport = db.Column(db.String(200))
+    arrival_code = db.Column(db.String(10))
+    arrival_airport = db.Column(db.String(200))
+    passengers = db.Column(db.Text)
+    source = db.Column(db.String(100))
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "flight_date": self.flight_date.isoformat() if self.flight_date else None,
+            "flight_date_str": self.flight_date_str,
+            "aircraft_tail": self.aircraft_tail,
+            "pilot": self.pilot,
+            "departure": self.departure_airport or self.departure_code,
+            "arrival": self.arrival_airport or self.arrival_code,
+            "passengers": self.passengers,
+        }
 
 
 class IngestJob(db.Model):

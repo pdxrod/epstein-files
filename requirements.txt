@@ -18,3 +18,5 @@ celery>=5.3
 redis>=5.0
 Pillow>=10.2
 bleach>=6.1
+datasets>=2.20
+pandas>=2.1

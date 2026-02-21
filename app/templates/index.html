@@ -14,14 +14,23 @@
     <p class="hero-note">Try "Lesly Goff" to find "Lesley Groff" — fuzzy matching handles Epstein's notorious misspellings</p>
 </section>
 
-{% if not has_data %}
+{% if worker.running %}
+<div class="worker-banner worker-banner-active" id="worker-banner">
+    <div class="worker-banner-dot"></div>
+    <span>AI is analysing documents: <strong id="worker-task">{{ worker.current_task }}</strong></span>
+    <span class="worker-banner-stats">
+        {{ worker.documents_analysed }} analysed · {{ worker.categories_discovered }} categories discovered
+    </span>
+</div>
+{% elif not has_data %}
 <div class="first-run-banner">
     <h3>Live search is active</h3>
     <p>Searching queries the <a href="https://www.epsteininvestigation.org" target="_blank" rel="noopener">Epstein Document Archive</a> API
        (207K+ documents from DOJ, FBI, and House Oversight). Results link to original PDFs and
        <a href="https://jmail.world" target="_blank" rel="noopener">jmail.world</a>.</p>
-    <p>For advanced features (entity extraction, email threading, deduplication, relevance scoring),
-       <a href="{{ url_for('main.admin_page') }}">ingest documents locally</a>.</p>
+    <p>To enable AI analysis (category discovery, relevance scoring, entity extraction), go to
+       <a href="{{ url_for('main.admin_page') }}">Admin</a> and start the AI worker.
+       Requires <a href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> running locally.</p>
 </div>
 {% endif %}
 
@@ -59,7 +68,7 @@
                 </svg>
             </div>
             <h3>Search by Category</h3>
-            <p>Browse documents grouped by topic: trafficking, financial crime, intelligence, and more</p>
+            <p>Browse documents grouped by topic — categories grow as AI discovers new themes</p>
         </a>
 
         <a href="{{ url_for('main.random_page') }}" class="mode-card mode-card-highlight">
@@ -76,6 +85,24 @@
 
 <section class="categories-section" id="categories">
     <h2>Categories</h2>
+    {% if ai_categories %}
+    <h3 class="category-section-label">AI-Discovered</h3>
+    <p class="section-note">New categories the AI has identified across documents. This list grows as more documents are analysed.</p>
+    <div class="category-grid">
+        {% for cat in ai_categories %}
+        <a href="{{ url_for('main.category_view', slug=cat.slug) }}" class="category-card category-card-ai">
+            <h4>{{ cat.name }}</h4>
+            <span class="badge badge-ai">AI</span>
+            <span class="badge">{{ cat.document_count | default(0) }} docs</span>
+            {% if cat.description %}
+            <p>{{ cat.description }}</p>
+            {% endif %}
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <h3 class="category-section-label">Core Categories</h3>
     <div class="category-grid">
         {% for cat in categories %}
         <a href="{{ url_for('main.category_view', slug=cat.slug) }}" class="category-card">
@@ -94,7 +121,7 @@
     <div class="stats-grid">
         <div class="stat-card">
             <div class="stat-number">{{ stats.total_documents | default(0) | int }}</div>
-            <div class="stat-label">Documents</div>
+            <div class="stat-label">Local Documents</div>
         </div>
         <div class="stat-card">
             <div class="stat-number">{{ stats.total_emails | default(0) | int }}</div>
@@ -110,12 +137,38 @@
         </div>
         <div class="stat-card">
             <div class="stat-number">{{ stats.high_relevance | default(0) | int }}</div>
-            <div class="stat-label">High-Relevance Docs</div>
+            <div class="stat-label">High-Relevance</div>
         </div>
         <div class="stat-card">
-            <div class="stat-number">{{ stats.total_duplicates | default(0) | int }}</div>
-            <div class="stat-label">Duplicates Removed</div>
+            <div class="stat-number" id="cat-count">{{ (categories | length) + (ai_categories | length) }}</div>
+            <div class="stat-label">Categories</div>
         </div>
     </div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+{% if worker.running %}
+<script>
+(function() {
+    function pollWorker() {
+        fetch("/api/worker/status")
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var el = document.getElementById("worker-task");
+                if (el) el.textContent = data.current_task || "idle";
+                var banner = document.getElementById("worker-banner");
+                if (banner) {
+                    var stats = banner.querySelector(".worker-banner-stats");
+                    if (stats) stats.textContent = data.documents_analysed + " analysed \u00b7 " + data.categories_discovered + " categories discovered";
+                }
+                if (data.running) setTimeout(pollWorker, 5000);
+                else if (banner) banner.classList.remove("worker-banner-active");
+            })
+            .catch(function() { setTimeout(pollWorker, 15000); });
+    }
+    setTimeout(pollWorker, 5000);
+})();
+</script>
+{% endif %}
 {% endblock %}

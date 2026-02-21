@@ -23,6 +23,8 @@ from app.live_search import (
     search_external_flights, get_external_document,
 )
 from app.models import Document, Category
+from app.ai import check_ollama
+from app.worker import start_worker, stop_worker, get_worker_status
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +95,17 @@ def index():
     stats = get_stats()
     categories = get_all_categories()
     has_data = stats.get("total_documents", 0) > 0
-    return render_template("index.html", stats=stats, categories=categories, has_data=has_data)
+    worker = get_worker_status()
+    ai_categories = (
+        Category.query.filter_by(is_system=False)
+        .order_by(Category.document_count.desc())
+        .all()
+    )
+    return render_template(
+        "index.html", stats=stats, categories=categories,
+        has_data=has_data, worker=worker,
+        ai_categories=[c.to_dict() for c in ai_categories],
+    )
 
 
 @main_bp.route("/search")
@@ -227,7 +239,17 @@ def admin_page():
     stats = get_stats()
     from app.models import IngestJob
     jobs = IngestJob.query.order_by(IngestJob.id.desc()).limit(20).all()
-    return render_template("admin.html", stats=stats, jobs=jobs)
+    ollama = check_ollama()
+    worker = get_worker_status()
+    ai_categories = (
+        Category.query.filter_by(is_system=False)
+        .order_by(Category.document_count.desc())
+        .all()
+    )
+    return render_template(
+        "admin.html", stats=stats, jobs=jobs,
+        ollama=ollama, worker=worker, ai_categories=ai_categories,
+    )
 
 
 # ─── JSON API ────────────────────────────────────────────────────────────────
@@ -360,6 +382,31 @@ def api_external_flights():
     ))
 
 
+@api_bp.route("/worker/start", methods=["POST"])
+def api_worker_start():
+    """Start the background AI analysis worker."""
+    from flask import current_app
+    started = start_worker(current_app._get_current_object())
+    return jsonify({"started": started, "status": get_worker_status()})
+
+
+@api_bp.route("/worker/stop", methods=["POST"])
+def api_worker_stop():
+    """Stop the background AI analysis worker."""
+    stop_worker()
+    return jsonify({"stopped": True, "status": get_worker_status()})
+
+
+@api_bp.route("/worker/status")
+def api_worker_status():
+    return jsonify(get_worker_status())
+
+
+@api_bp.route("/ai/status")
+def api_ai_status():
+    return jsonify(check_ollama())
+
+
 @api_bp.route("/ingest", methods=["POST"])
 def api_ingest():
     """Trigger ingestion from various sources."""
@@ -386,5 +433,81 @@ def api_ingest():
         from app.scraper import ingest_text_content
         doc = ingest_text_content(file_id, text, metadata)
         return jsonify({"status": "ok", "document": doc.to_dict() if doc else None})
+    elif source == "huggingface":
+        max_docs = data.get("max_docs")
+        try:
+            from app.datasources import import_huggingface_dataset
+            count = import_huggingface_dataset(db, max_docs=max_docs)
+            return jsonify({"status": "completed", "documents_imported": count})
+        except Exception as e:
+            logger.error(f"HF import failed: {e}", exc_info=True)
+            return jsonify({"status": "error", "error": str(e)}), 500
+    elif source == "archive_csvs":
+        try:
+            from app.datasources import import_all_archive_csvs
+            results = import_all_archive_csvs(db)
+            return jsonify({"status": "completed", "results": results})
+        except Exception as e:
+            logger.error(f"CSV import failed: {e}", exc_info=True)
+            return jsonify({"status": "error", "error": str(e)}), 500
 
     return jsonify({"error": f"Unknown source: {source}"}), 400
+
+
+@api_bp.route("/data/relationships")
+def api_relationships():
+    """Get entity relationship graph."""
+    from app.models import EntityRelationship
+    page = request.args.get("page", 1, type=int)
+    limit = request.args.get("limit", 50, type=int)
+    entity = request.args.get("entity", "")
+
+    query = EntityRelationship.query
+    if entity:
+        from app.models import Entity
+        matches = Entity.query.filter(Entity.name.ilike(f"%{entity}%")).all()
+        ids = [e.id for e in matches]
+        if ids:
+            query = query.filter(
+                db.or_(
+                    EntityRelationship.entity_a_id.in_(ids),
+                    EntityRelationship.entity_b_id.in_(ids),
+                )
+            )
+        else:
+            return jsonify({"items": [], "total": 0})
+
+    total = query.count()
+    rels = query.order_by(EntityRelationship.strength.desc()).offset(
+        (page - 1) * limit
+    ).limit(limit).all()
+
+    return jsonify({
+        "items": [r.to_dict() for r in rels],
+        "total": total,
+        "page": page,
+    })
+
+
+@api_bp.route("/data/flights")
+def api_local_flights():
+    """Get locally imported flight records."""
+    from app.models import FlightRecord
+    page = request.args.get("page", 1, type=int)
+    limit = request.args.get("limit", 50, type=int)
+    passenger = request.args.get("passenger", "")
+
+    query = FlightRecord.query
+    if passenger:
+        query = query.filter(FlightRecord.passengers.ilike(f"%{passenger}%"))
+
+    total = query.count()
+    flights = query.order_by(FlightRecord.flight_date.desc()).offset(
+        (page - 1) * limit
+    ).limit(limit).all()
+
+    return jsonify({
+        "items": [f.to_dict() for f in flights],
+        "total": total,
+        "page": page,
+    })

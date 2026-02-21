@@ -16,6 +16,8 @@ class Config:
         "CELERY_RESULT_BACKEND", "redis://localhost:6379/0"
     )
     RESULTS_PER_PAGE = 25
+    OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+    OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
     DOJ_BASE_URL = "https://www.justice.gov/epstein"
     JMAIL_BASE_URL = "https://jmail.world"
 

@@ -1,3 +1,5 @@
+import logging
+
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
@@ -10,6 +12,19 @@ migrate = Migrate()
 def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
+
+    # Quiet logging: suppress the per-request access log lines and
+    # chatty libraries, but keep warnings and our own app.* loggers.
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    logging.getLogger("alembic").setLevel(logging.WARNING)
+    logging.getLogger("datasets").setLevel(logging.WARNING)
+
+    app_log = logging.getLogger("app")
+    if not app_log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        app_log.addHandler(handler)
+    app_log.setLevel(logging.INFO)
 
     db.init_app(app)
     migrate.init_app(app, db)

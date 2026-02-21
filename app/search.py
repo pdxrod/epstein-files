@@ -372,6 +372,8 @@ def get_date_histogram():
 
 def get_stats():
     """Get overall database statistics."""
+    from app.models import EntityRelationship, FlightRecord
+
     return {
         "total_documents": Document.query.filter_by(is_duplicate=False).count(),
         "total_emails": Document.query.filter_by(doc_type="email", is_duplicate=False).count(),
@@ -382,6 +384,10 @@ def get_stats():
         "high_relevance": Document.query.filter(
             Document.relevance_score > 0.3, Document.is_duplicate == False
         ).count(),
+        "ai_analysed": Document.query.filter_by(processed=True).count(),
+        "unprocessed": Document.query.filter_by(processed=False).count(),
+        "relationships": EntityRelationship.query.count(),
+        "flights": FlightRecord.query.count(),
     }
 
 
