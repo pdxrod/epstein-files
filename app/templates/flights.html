@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Flight Logs — Epstein Files{% endblock %}
+
+{% block content %}
+<section class="flights-page">
+    <h1>Flight Logs</h1>
+    <p class="section-description">Search 3,000+ flight records from Epstein's aircraft. Data from the Epstein Document Archive.</p>
+
+    <form action="{{ url_for('main.flights_page') }}" method="GET" class="search-form">
+        <div class="filter-grid">
+            <div class="filter-group">
+                <label>Passenger Name</label>
+                <input type="text" name="passenger" value="{{ passenger }}" placeholder="e.g. Clinton, Maxwell…" class="search-input-large">
+            </div>
+            <div class="filter-group">
+                <label>Airport Code</label>
+                <input type="text" name="airport" value="{{ airport }}" placeholder="e.g. TEB, PBI…" class="search-input-large">
+            </div>
+            <div class="filter-group" style="align-self: flex-end;">
+                <button type="submit" class="btn btn-primary">Search Flights</button>
+            </div>
+        </div>
+    </form>
+
+    {% if results['items'] %}
+    <p class="results-count">{{ results.total }} flight{{ 's' if results.total != 1 }} found</p>
+
+    <div class="results-list">
+        {% for flight in results['items'] %}
+        <article class="result-card">
+            <div class="result-header">
+                <span class="result-title">
+                    {{ flight.departure_airport or flight.departure_airport_code or '?' }}
+                    &rarr;
+                    {{ flight.arrival_airport or flight.arrival_airport_code or '?' }}
+                </span>
+                <div class="result-meta">
+                    {% if flight.flight_date %}
+                    <span class="result-date">{{ flight.flight_date }}</span>
+                    {% endif %}
+                    {% if flight.aircraft_id %}
+                    <span class="badge badge-type">{{ flight.aircraft_id }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% if flight.passenger_names %}
+            <div class="flight-passengers">
+                <strong>Passengers:</strong>
+                {% for name in flight.passenger_names %}
+                <a href="{{ url_for('main.search_page', q=name, type='name') }}" class="entity-tag entity-person">{{ name }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if flight.pilot %}
+            <div class="result-email-meta">
+                <span><strong>Pilot:</strong> {{ flight.pilot }}</span>
+            </div>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+
+    {% if results.pages > 1 %}
+    <nav class="pagination">
+        {% if results.page > 1 %}
+        <a href="{{ url_for('main.flights_page', passenger=passenger, airport=airport, page=results.page - 1) }}" class="btn btn-secondary">&larr; Previous</a>
+        {% endif %}
+        <span class="page-info">Page {{ results.page }} of {{ results.pages }}</span>
+        {% if results.page < results.pages %}
+        <a href="{{ url_for('main.flights_page', passenger=passenger, airport=airport, page=results.page + 1) }}" class="btn btn-secondary">Next &rarr;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+
+    {% elif passenger or airport %}
+    <div class="no-results">
+        <p>No flights found for the given criteria.</p>
+    </div>
+    {% else %}
+    <div class="search-suggestions">
+        <h3>Popular searches</h3>
+        <div class="suggestion-grid">
+            <a href="{{ url_for('main.flights_page', passenger='Clinton') }}" class="suggestion">Clinton</a>
+            <a href="{{ url_for('main.flights_page', passenger='Maxwell') }}" class="suggestion">Maxwell</a>
+            <a href="{{ url_for('main.flights_page', passenger='Andrew') }}" class="suggestion">Prince Andrew</a>
+            <a href="{{ url_for('main.flights_page', airport='TEB') }}" class="suggestion">Teterboro (TEB)</a>
+            <a href="{{ url_for('main.flights_page', airport='PBI') }}" class="suggestion">Palm Beach (PBI)</a>
+            <a href="{{ url_for('main.flights_page', airport='STT') }}" class="suggestion">St. Thomas (STT)</a>
+        </div>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
