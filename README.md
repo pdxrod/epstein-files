@@ -51,7 +51,7 @@ The `epstein.sh` script runs the app as a background daemon:
 ./epstein.sh log       # Tail the log file (Ctrl-C to stop watching)
 ```
 
-The app runs on **http://localhost:5555** by default. Set the `PORT` environment variable to change it.
+The app runs on **http://localhost:5555** by default (see [Configuration](#configuration) to change it).
 
 For interactive/debug mode (logs to terminal, auto-reloads on code changes):
 
@@ -178,6 +178,36 @@ POST /api/worker/start
 POST /api/worker/stop
 POST /api/ingest  {"source": "huggingface"}
 POST /api/ingest  {"source": "archive_csvs"}
+```
+
+## Configuration
+
+All settings are in `config.py` and can be overridden with environment variables. Set them in your shell, in a `.env` file (for Docker Compose), or export them before running `./epstein.sh start`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `5555` | Web server port |
+| `FLASK_DEBUG` | `0` | `1` for debug mode (auto-reload, verbose logs) |
+| `SECRET_KEY` | random | Flask session secret (set in production) |
+| `DATABASE_URL` | `sqlite:///data/epstein.db` | Database connection string |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_MODEL` | *(auto-detect)* | Force a specific model, e.g. `llama3.1:70b` |
+| `ARCHIVE_API_URL` | `https://www.epsteininvestigation.org/api/v1` | External document archive API |
+| `DOJ_BASE_URL` | `https://www.justice.gov/epstein` | DOJ document source |
+| `JMAIL_BASE_URL` | `https://jmail.world` | Jmail archive source |
+| `RESULTS_PER_PAGE` | `25` | Search results per page |
+| `WORKER_ANALYSIS_DELAY` | `2` | Seconds between AI analyses (be kind to Ollama) |
+| `WORKER_FETCH_DELAY` | `1` | Seconds between API fetches |
+| `WORKER_FETCH_BATCH` | `20` | Documents per API fetch |
+| `CATEGORY_DISCOVERY_BATCH` | `15` | Docs analysed before running category discovery |
+| `BULK_IMPORT_MAX_DOCS` | `5000` | Max documents for bulk API import |
+| `GUNICORN_WORKERS` | `4` | Gunicorn worker processes (Docker only) |
+| `GUNICORN_TIMEOUT` | `120` | Gunicorn request timeout in seconds (Docker only) |
+
+Example — run on port 8080 with a specific model:
+
+```bash
+PORT=8080 OLLAMA_MODEL=mistral:7b ./epstein.sh start
 ```
 
 ## Architecture

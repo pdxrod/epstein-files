@@ -22,6 +22,14 @@ COPY . .
 
 RUN mkdir -p data/pdfs
 
-EXPOSE 5555
+ENV PORT=5555 \
+    GUNICORN_WORKERS=4 \
+    GUNICORN_TIMEOUT=120
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5555", "--workers", "4", "--timeout", "120", "run:app"]
+EXPOSE ${PORT}
+
+CMD gunicorn \
+    --bind "0.0.0.0:${PORT}" \
+    --workers "${GUNICORN_WORKERS}" \
+    --timeout "${GUNICORN_TIMEOUT}" \
+    run:app

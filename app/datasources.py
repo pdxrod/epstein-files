@@ -17,14 +17,17 @@ import re
 from datetime import datetime
 
 import requests
+from config import Config
 
 logger = logging.getLogger(__name__)
 
+_ARCHIVE_BASE = Config.ARCHIVE_API_URL.replace("/api/v1", "")
+
 ARCHIVE_CSV_URLS = {
-    "entities": "https://www.epsteininvestigation.org/api/download/entities",
-    "flights": "https://www.epsteininvestigation.org/api/download/flights",
-    "relationships": "https://www.epsteininvestigation.org/api/download/relationships",
-    "emails": "https://www.epsteininvestigation.org/api/download/emails",
+    "entities": f"{_ARCHIVE_BASE}/api/download/entities",
+    "flights": f"{_ARCHIVE_BASE}/api/download/flights",
+    "relationships": f"{_ARCHIVE_BASE}/api/download/relationships",
+    "emails": f"{_ARCHIVE_BASE}/api/download/emails",
 }
 
 
@@ -197,7 +200,7 @@ def import_huggingface_dataset(db, batch_size=100, max_docs=None):
 
     # Method 3: Bulk fetch from epsteininvestigation.org API
     logger.info("Falling back to bulk API fetch from epsteininvestigation.org...")
-    return _import_via_api_bulk(db, batch_size, max_docs or 5000)
+    return _import_via_api_bulk(db, batch_size, max_docs or Config.BULK_IMPORT_MAX_DOCS)
 
 
 def _ingest_csv_text(db, csv_text, batch_size=100, max_docs=None):
@@ -306,7 +309,7 @@ def _import_hf_via_library(db, batch_size=100, max_docs=None):
     return count
 
 
-def _import_via_api_bulk(db, batch_size=100, max_docs=5000):
+def _import_via_api_bulk(db, batch_size=100, max_docs=None):
     """
     Bulk-fetch documents from the epsteininvestigation.org API.
 
@@ -319,8 +322,9 @@ def _import_via_api_bulk(db, batch_size=100, max_docs=5000):
     """
     from app.models import Document
 
-    API_BASE = "https://www.epsteininvestigation.org/api/v1"
+    API_BASE = Config.ARCHIVE_API_URL
     count = 0
+    max_docs = max_docs or Config.BULK_IMPORT_MAX_DOCS
 
     # Phase A: Bulk import metadata from /documents
     logger.info("Bulk import phase A: document metadata...")

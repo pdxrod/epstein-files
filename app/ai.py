@@ -15,29 +15,29 @@ The LLM analyses each document for:
 
 import json
 import logging
-import os
 import re
 
 import requests
+from config import Config
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "")
-
-
 _cached_model: str | None = None
+
+
+def _ollama_url() -> str:
+    return Config.OLLAMA_URL
 
 
 def _get_model() -> str:
     """Get the configured model, or auto-detect the best available one."""
     global _cached_model
-    if OLLAMA_MODEL:
-        return OLLAMA_MODEL
+    if Config.OLLAMA_MODEL:
+        return Config.OLLAMA_MODEL
     if _cached_model:
         return _cached_model
     try:
-        resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
         if resp.status_code == 200:
             models = [m["name"] for m in resp.json().get("models", [])]
             preferences = ["70b", "32b", "20b", "13b", "8b", "7b", "3b"]
@@ -155,12 +155,12 @@ def check_ollama() -> dict:
     """Check if Ollama is running and which models are available."""
     model = _get_model()
     try:
-        resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
         if resp.status_code == 200:
             models = [m["name"] for m in resp.json().get("models", [])]
             return {
                 "status": "running",
-                "url": OLLAMA_URL,
+                "url": _ollama_url(),
                 "models": models,
                 "configured_model": model,
                 "model_available": any(
@@ -174,7 +174,7 @@ def check_ollama() -> dict:
 
     return {
         "status": "not_running",
-        "url": OLLAMA_URL,
+        "url": _ollama_url(),
         "models": [],
         "configured_model": model,
         "model_available": False,
@@ -186,7 +186,7 @@ def _query_ollama(prompt: str, system: str = SYSTEM_PROMPT, temperature: float =
     model = _get_model()
     try:
         resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
+            f"{_ollama_url()}/api/generate",
             json={
                 "model": model,
                 "prompt": prompt,

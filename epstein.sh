@@ -26,7 +26,6 @@ case "$1" in
 
         sleep 1
         if ps -p "$PID" > /dev/null 2>&1; then
-            PORT=$(grep -o 'PORT.*[0-9]\+' run.py 2>/dev/null | grep -o '[0-9]\+' | tail -1)
             PORT=${PORT:-5555}
             echo "Running (PID: $PID) — http://localhost:$PORT"
             echo "Log: $LOG_FILE"

@@ -17,6 +17,8 @@ import threading
 import time
 from datetime import datetime
 
+from config import Config
+
 logger = logging.getLogger(__name__)
 
 _worker_thread: threading.Thread | None = None
@@ -34,10 +36,10 @@ _worker_status = {
 }
 _status_lock = threading.Lock()
 
-CATEGORY_DISCOVERY_BATCH = 15
-ANALYSIS_DELAY = 2
-FETCH_DELAY = 1
-FETCH_BATCH_SIZE = 20
+CATEGORY_DISCOVERY_BATCH = Config.CATEGORY_DISCOVERY_BATCH
+ANALYSIS_DELAY = Config.WORKER_ANALYSIS_DELAY
+FETCH_DELAY = Config.WORKER_FETCH_DELAY
+FETCH_BATCH_SIZE = Config.WORKER_FETCH_BATCH
 
 
 def get_worker_status() -> dict:

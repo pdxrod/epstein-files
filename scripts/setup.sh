@@ -44,7 +44,7 @@ docker-compose up -d
 echo ""
 echo "=== Setup Complete ==="
 echo ""
-echo "The application is running at: http://$(hostname -I | awk '{print $1}'):5555"
+echo "The application is running at: http://$(hostname -I | awk '{print $1}'):${PORT:-5555}"
 echo ""
 echo "Useful commands:"
 echo "  docker-compose logs -f web     # View application logs"

@@ -15,12 +15,13 @@ from urllib.parse import quote_plus
 import requests
 
 from app.nlp import resolve_name, clean_query, generate_query_variants, score_relevance
+from config import Config
 
 logger = logging.getLogger(__name__)
 
-API_BASE = "https://www.epsteininvestigation.org/api/v1"
-JMAIL_BASE = "https://jmail.world"
-DOJ_BASE = "https://www.justice.gov/epstein"
+API_BASE = Config.ARCHIVE_API_URL
+JMAIL_BASE = Config.JMAIL_BASE_URL
+DOJ_BASE = Config.DOJ_BASE_URL
 
 _session = requests.Session()
 _session.headers.update({
