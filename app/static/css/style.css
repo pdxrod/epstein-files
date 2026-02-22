@@ -401,7 +401,10 @@ a:hover { color: var(--accent-hover); }
     font-weight: 600;
     color: var(--accent);
     flex: 1;
+    text-decoration: none;
 }
+
+a.result-title:hover { text-decoration: underline; }
 
 .result-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
@@ -996,6 +999,14 @@ a:hover { color: var(--accent-hover); }
     background: rgba(74,125,255,0.1);
     border: 1px solid rgba(74,125,255,0.2);
     color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+a.category-tag:hover {
+    background: rgba(74,125,255,0.2);
+    border-color: var(--accent);
 }
 
 .result-categories {

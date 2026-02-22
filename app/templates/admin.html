@@ -112,7 +112,7 @@
             {% for a in worker.recent_analyses | reverse %}
             <div class="result-card">
                 <div class="result-header">
-                    <span class="result-title">{{ a.file_id }}</span>
+                    <a href="{{ url_for('main.search_page', q=a.file_id) }}" class="result-title">{{ a.file_id }}</a>
                     <span class="badge badge-relevance badge-relevance-{{ 'high' if a.relevance > 0.5 else 'medium' if a.relevance > 0.2 else 'low' }}">
                         {{ '%.0f' | format(a.relevance * 100) }}%
                     </span>
@@ -121,14 +121,14 @@
                 {% if a.categories %}
                 <div class="result-categories">
                     {% for cat in a.categories %}
-                    <span class="category-tag">{{ cat }}</span>
+                    <a href="{{ url_for('main.search_page', q=cat) }}" class="category-tag">{{ cat }}</a>
                     {% endfor %}
                 </div>
                 {% endif %}
                 {% if a.new_categories %}
                 <div class="result-categories">
                     {% for cat in a.new_categories %}
-                    <span class="category-tag category-tag-new">NEW: {{ cat }}</span>
+                    <a href="{{ url_for('main.search_page', q=cat) }}" class="category-tag category-tag-new">NEW: {{ cat }}</a>
                     {% endfor %}
                 </div>
                 {% endif %}
