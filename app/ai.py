@@ -29,6 +29,38 @@ def _ollama_url() -> str:
     return Config.OLLAMA_URL
 
 
+def _model_score(name: str) -> tuple[int, int]:
+    """Score a model by family recency then size. Higher = preferred."""
+    name_l = name.lower()
+    # Newer instruction-tuned families first — they produce better JSON
+    family_order = [
+        "llama3.2", "llama3.1", "llama3",
+        "qwen2.5", "qwen2",
+        "gemma2",
+        "mistral",
+        "phi3",
+        "gemma", "phi",
+        "llama2", "llama",
+    ]
+    family_score = 0
+    for i, fam in enumerate(family_order):
+        if fam in name_l:
+            family_score = len(family_order) - i
+            break
+
+    size_scores = {
+        "70b": 70, "32b": 32, "22b": 22, "20b": 20,
+        "13b": 13, "8b": 8, "7b": 7, "3b": 3, "2b": 2,
+    }
+    size_score = 0
+    for size_str, score in size_scores.items():
+        if size_str in name_l:
+            size_score = score
+            break
+
+    return (family_score, size_score)
+
+
 def _get_model() -> str:
     """Get the configured model, or auto-detect the best available one."""
     global _cached_model
@@ -40,19 +72,24 @@ def _get_model() -> str:
         resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
         if resp.status_code == 200:
             models = [m["name"] for m in resp.json().get("models", [])]
-            preferences = ["70b", "32b", "20b", "13b", "8b", "7b", "3b"]
-            for pref in preferences:
-                for m in models:
-                    if pref in m:
-                        logger.info(f"Auto-selected model: {m}")
-                        _cached_model = m
-                        return m
             if models:
-                _cached_model = models[0]
+                _cached_model = max(models, key=_model_score)
+                logger.info(f"Auto-selected model: {_cached_model}")
                 return _cached_model
     except Exception:
         pass
     return "llama3.1:8b"
+
+
+def _doc_context_chars(model: str) -> int:
+    """Return how many document chars to send, scaled to model capacity."""
+    name_l = model.lower()
+    if any(s in name_l for s in ["70b", "32b", "22b"]):
+        return 8000
+    if any(s in name_l for s in ["20b", "13b"]):
+        return 5000
+    return 3000
+
 
 # The system prompt encodes what "relevant" means for the Epstein files.
 SYSTEM_PROMPT = """\
@@ -115,7 +152,7 @@ Document ID: {file_id}
 Source: {source}
 Date: {date}
 
---- DOCUMENT TEXT (first 3000 chars) ---
+--- DOCUMENT TEXT ---
 {text}
 --- END ---
 
@@ -182,25 +219,28 @@ def check_ollama() -> dict:
 
 
 def _query_ollama(prompt: str, system: str = SYSTEM_PROMPT, temperature: float = 0.1) -> str | None:
-    """Send a prompt to Ollama and return the response text."""
+    """Send a prompt to Ollama via the chat API and return the response text."""
     model = _get_model()
     try:
         resp = requests.post(
-            f"{_ollama_url()}/api/generate",
+            f"{_ollama_url()}/api/chat",
             json={
                 "model": model,
-                "prompt": prompt,
-                "system": system,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
                 "stream": False,
+                "format": "json",
                 "options": {
                     "temperature": temperature,
-                    "num_predict": 2048,
+                    "num_predict": 4096,
                 },
             },
             timeout=120,
         )
         if resp.status_code == 200:
-            return resp.json().get("response", "")
+            return resp.json().get("message", {}).get("content", "")
         else:
             logger.warning(f"Ollama returned {resp.status_code}: {resp.text[:200]}")
     except requests.ConnectionError:
@@ -249,16 +289,22 @@ def analyse_document(text: str, file_id: str = "", source: str = "",
         return None
 
     cats = known_categories or _default_categories()
+    ctx_chars = _doc_context_chars(_get_model())
     prompt = ANALYSIS_PROMPT.format(
         file_id=file_id,
         source=source,
         date=date or "unknown",
-        text=text[:3000],
+        text=text[:ctx_chars],
         known_categories=", ".join(cats),
     )
 
     raw = _query_ollama(prompt)
     result = _parse_json_response(raw)
+
+    if result is None:
+        logger.debug(f"JSON parse failed for {file_id}, retrying...")
+        raw = _query_ollama(prompt, temperature=0.05)
+        result = _parse_json_response(raw)
 
     if result:
         # Normalise and validate
@@ -296,6 +342,11 @@ def discover_categories(summaries: list[dict],
 
     raw = _query_ollama(prompt, temperature=0.3)
     result = _parse_json_response(raw)
+
+    if result is None:
+        logger.debug("Category discovery JSON parse failed, retrying...")
+        raw = _query_ollama(prompt, temperature=0.2)
+        result = _parse_json_response(raw)
 
     if result and "new_categories" in result:
         return result["new_categories"]
