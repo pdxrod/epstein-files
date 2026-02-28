@@ -13,11 +13,13 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from sqlalchemy import and_, or_
 
 try:
     import pdfplumber
@@ -30,7 +32,7 @@ except ImportError:
     PdfReader = None
 
 from app import db
-from app.models import Document, Entity, Category, Thread, NameVariant, IngestJob
+from app.models import Document, Entity, Category, Thread, NameVariant, IngestJob, document_links
 from app.nlp import (
     compute_content_hash,
     extract_entities,
@@ -76,6 +78,28 @@ def ensure_system_categories():
     db.session.commit()
 
 
+def extract_pdf_text(pdf_path: str) -> str | None:
+    """Extract text from a PDF using pdfplumber with PyPDF2 as fallback."""
+    text = None
+    if pdfplumber:
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                pages = [p.extract_text() for p in pdf.pages if p.extract_text()]
+                text = "\n\n".join(pages)
+        except Exception as e:
+            logger.warning(f"pdfplumber failed on {pdf_path}: {e}")
+
+    if not text and PdfReader:
+        try:
+            reader = PdfReader(pdf_path)
+            pages = [p.extract_text() for p in reader.pages if p.extract_text()]
+            text = "\n\n".join(pages)
+        except Exception as e:
+            logger.warning(f"PyPDF2 failed on {pdf_path}: {e}")
+
+    return text or None
+
+
 class DOJScraper:
     """Scrapes documents from justice.gov/epstein."""
 
@@ -98,7 +122,6 @@ class DOJScraper:
             resp = self.session.get(self.DISCLOSURES_URL, timeout=30)
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "lxml")
-
             for link in soup.find_all("a", href=True):
                 href = link["href"]
                 if ".pdf" in href.lower():
@@ -113,27 +136,40 @@ class DOJScraper:
         except Exception as e:
             logger.error(f"Error discovering DOJ documents: {e}")
 
-        for vol_name, vol_url in DOJ_VOLUMES.items():
-            try:
-                resp = self.session.get(vol_url, timeout=30)
-                if resp.status_code == 200:
-                    soup = BeautifulSoup(resp.text, "lxml")
-                    for link in soup.find_all("a", href=True):
-                        href = link["href"]
-                        if ".pdf" in href.lower():
-                            full_url = urljoin(vol_url, href)
-                            file_id = self._extract_file_id(href)
-                            docs.append({
-                                "url": full_url,
-                                "file_id": file_id,
-                                "source": "doj",
-                                "volume": vol_name,
-                                "title": link.get_text(strip=True) or file_id,
-                            })
-            except Exception as e:
-                logger.warning(f"Error accessing volume {vol_name}: {e}")
-            time.sleep(1)
+        # Fetch all 12 volumes in parallel (4 workers — polite to the server)
+        headers = dict(self.session.headers)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(self._fetch_volume, vol_name, vol_url, headers): vol_name
+                for vol_name, vol_url in DOJ_VOLUMES.items()
+            }
+            for future in as_completed(futures):
+                docs.extend(future.result())
 
+        return docs
+
+    @staticmethod
+    def _fetch_volume(vol_name: str, vol_url: str, headers: dict) -> list[dict]:
+        """Fetch a single DOJ volume page and return its document list."""
+        docs = []
+        try:
+            resp = requests.get(vol_url, timeout=30, headers=headers)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "lxml")
+                for link in soup.find_all("a", href=True):
+                    href = link["href"]
+                    if ".pdf" in href.lower():
+                        full_url = urljoin(vol_url, href)
+                        file_id = DOJScraper._extract_file_id(href)
+                        docs.append({
+                            "url": full_url,
+                            "file_id": file_id,
+                            "source": "doj",
+                            "volume": vol_name,
+                            "title": link.get_text(strip=True) or file_id,
+                        })
+        except Exception as e:
+            logger.warning(f"Error accessing volume {vol_name}: {e}")
         return docs
 
     def download_pdf(self, url: str, file_id: str) -> str | None:
@@ -155,32 +191,7 @@ class DOJScraper:
 
     def extract_text(self, pdf_path: str) -> str | None:
         """Extract text from a PDF file."""
-        text = None
-        if pdfplumber:
-            try:
-                with pdfplumber.open(pdf_path) as pdf:
-                    pages = []
-                    for page in pdf.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            pages.append(page_text)
-                    text = "\n\n".join(pages)
-            except Exception as e:
-                logger.warning(f"pdfplumber failed on {pdf_path}: {e}")
-
-        if not text and PdfReader:
-            try:
-                reader = PdfReader(pdf_path)
-                pages = []
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        pages.append(page_text)
-                text = "\n\n".join(pages)
-            except Exception as e:
-                logger.warning(f"PyPDF2 failed on {pdf_path}: {e}")
-
-        return text
+        return extract_pdf_text(pdf_path)
 
     @staticmethod
     def _extract_file_id(url: str) -> str:
@@ -298,11 +309,20 @@ class DocumentProcessor:
             db.session.add(doc)
         db.session.flush()
 
+        # Batch-load all entities for this document in a single query
+        if entities:
+            filters = [
+                and_(Entity.name == e["name"], Entity.entity_type == e["entity_type"])
+                for e in entities
+            ]
+            known = Entity.query.filter(or_(*filters)).all()
+            entity_map = {(e.name, e.entity_type): e for e in known}
+        else:
+            entity_map = {}
+
         for ent_data in entities:
-            entity = Entity.query.filter_by(
-                name=ent_data["name"],
-                entity_type=ent_data["entity_type"],
-            ).first()
+            key = (ent_data["name"], ent_data["entity_type"])
+            entity = entity_map.get(key)
             if not entity:
                 entity = Entity(
                     name=ent_data["name"],
@@ -311,6 +331,7 @@ class DocumentProcessor:
                     mention_count=1,
                 )
                 db.session.add(entity)
+                entity_map[key] = entity
             else:
                 entity.mention_count = (entity.mention_count or 0) + 1
             if entity not in doc.entities:
@@ -331,12 +352,15 @@ class DocumentProcessor:
             self._handle_embedded_emails(doc, email_data["quoted_emails"])
 
         db.session.commit()
-
         self._update_fts(doc)
 
         return doc
 
     def _classify_type(self, text: str, metadata: dict) -> str:
+        # Explicit metadata takes precedence over text heuristics
+        if metadata.get("doc_type"):
+            return metadata["doc_type"]
+
         text_lower = text[:2000].lower()
         if any(
             marker in text_lower
@@ -354,18 +378,75 @@ class DocumentProcessor:
             for marker in ["flight", "passenger", "tail number", "departure", "arrival"]
         ):
             return "flight_log"
-        if metadata.get("doc_type"):
-            return metadata["doc_type"]
         return "document"
 
     def _handle_embedded_emails(self, parent_doc: Document, quoted_emails: list[str]):
-        """Handle emails embedded in the parent email (deduplication)."""
+        """Store embedded/quoted emails as linked child documents."""
         for i, quoted_text in enumerate(quoted_emails):
-            quoted_hash = compute_content_hash(quoted_text)
-            existing_id = self._hash_cache.get(quoted_hash)
-            if existing_id:
+            if not quoted_text or len(quoted_text) < 30:
                 continue
-            pass
+
+            quoted_hash = compute_content_hash(quoted_text)
+
+            if quoted_hash in self._hash_cache:
+                # Already stored — just add the link to this parent
+                existing_id = self._hash_cache[quoted_hash]
+                try:
+                    db.session.execute(
+                        document_links.insert().prefix_with("OR IGNORE").values(
+                            source_id=parent_doc.id,
+                            target_id=existing_id,
+                            link_type="embedded",
+                        )
+                    )
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+                continue
+
+            child_file_id = f"{parent_doc.file_id}_emb_{i}"
+            if Document.query.filter_by(file_id=child_file_id).first():
+                continue
+
+            email_data = parse_email(quoted_text)
+            relevance_score, relevance_cats = score_relevance(quoted_text)
+            dates = extract_dates(quoted_text)
+
+            child = Document(
+                file_id=child_file_id,
+                body=quoted_text,
+                doc_type="email",
+                source=parent_doc.source,
+                title=email_data.get("subject") or f"Embedded email from {parent_doc.file_id}",
+                sender=email_data.get("sender"),
+                sender_email=email_data.get("sender_email"),
+                recipients=email_data.get("recipients"),
+                subject=email_data.get("subject") or parent_doc.subject,
+                date=email_data.get("date") or (dates[0] if dates else None),
+                date_str=email_data.get("date_str"),
+                content_hash=quoted_hash,
+                relevance_score=relevance_score,
+                relevance_categories=json.dumps(relevance_cats) if relevance_cats else None,
+                processed=False,
+            )
+            db.session.add(child)
+            db.session.flush()
+            self._hash_cache[quoted_hash] = child.id
+
+            try:
+                db.session.execute(
+                    document_links.insert().prefix_with("OR IGNORE").values(
+                        source_id=parent_doc.id,
+                        target_id=child.id,
+                        link_type="embedded",
+                    )
+                )
+                db.session.commit()
+            except Exception as e:
+                logger.warning(f"Failed to store embedded email {child_file_id}: {e}")
+                db.session.rollback()
+
+            self._update_fts(child)
 
     def _update_fts(self, doc: Document):
         """Update the FTS index for a document."""
@@ -410,7 +491,7 @@ class ThreadBuilder:
             subject_groups[normalised].append(email)
 
         for subject, group in subject_groups.items():
-            if len(group) < 1:
+            if len(group) < 2:
                 continue
 
             participants = set()
@@ -469,12 +550,10 @@ def ingest_local_pdfs(directory: str, source: str = "local"):
 
     logger.info(f"Found {len(pdf_files)} PDF files in {directory}")
 
-    scraper = DOJScraper(os.path.dirname(directory))
     count = 0
-
     for pdf_path in pdf_files:
         file_id = DOJScraper._extract_file_id(pdf_path)
-        text = scraper.extract_text(pdf_path)
+        text = extract_pdf_text(pdf_path)
         if text:
             metadata = {
                 "source": source,
@@ -517,7 +596,7 @@ def ingest_from_doj():
         for i, doc_meta in enumerate(docs):
             pdf_path = scraper.download_pdf(doc_meta["url"], doc_meta["file_id"])
             if pdf_path:
-                text = scraper.extract_text(pdf_path)
+                text = extract_pdf_text(pdf_path)
                 if text:
                     metadata = {
                         "source": "doj",
