@@ -6,10 +6,11 @@ to the public Epstein Files API at epsteininvestigation.org (207K+ documents).
 """
 
 import logging
+import threading
 
 from flask import (
     Blueprint, render_template, request, jsonify, session,
-    redirect, url_for, abort,
+    redirect, url_for, abort, current_app,
 )
 
 from app import db
@@ -22,7 +23,7 @@ from app.live_search import (
     search_external, search_external_documents, search_external_entities,
     search_external_flights, get_external_document,
 )
-from app.models import Document, Category
+from app.models import Document, Category, IngestJob
 from app.ai import check_ollama
 from app.worker import start_worker, stop_worker, get_worker_status
 
@@ -31,13 +32,23 @@ logger = logging.getLogger(__name__)
 main_bp = Blueprint("main", __name__)
 api_bp = Blueprint("api", __name__)
 
+_MAX_LIMIT = 200
+
 
 def _age_verified():
     return session.get("age_verified", False)
 
 
-def _local_db_has_data():
-    return Document.query.filter_by(is_duplicate=False).count() > 0
+def _parse_search_filters() -> dict:
+    """Extract and clean search filter parameters from the request."""
+    filters = {
+        "doc_type": request.args.get("doc_type"),
+        "source": request.args.get("source"),
+        "min_relevance": request.args.get("min_relevance"),
+        "date_from": request.args.get("date_from"),
+        "date_to": request.args.get("date_to"),
+    }
+    return {k: v for k, v in filters.items() if v}
 
 
 def _search_with_fallback(query, page, search_type, filters):
@@ -117,15 +128,7 @@ def search_page():
     results = {"items": [], "total": 0, "page": 1, "pages": 0}
 
     if query:
-        filters = {
-            "doc_type": request.args.get("doc_type"),
-            "source": request.args.get("source"),
-            "min_relevance": request.args.get("min_relevance"),
-            "date_from": request.args.get("date_from"),
-            "date_to": request.args.get("date_to"),
-        }
-        filters = {k: v for k, v in filters.items() if v}
-        results = _search_with_fallback(query, page, search_type, filters)
+        results = _search_with_fallback(query, page, search_type, _parse_search_filters())
 
     categories = get_all_categories()
     return render_template(
@@ -237,7 +240,6 @@ def flights_page():
 @main_bp.route("/admin")
 def admin_page():
     stats = get_stats()
-    from app.models import IngestJob
     jobs = IngestJob.query.order_by(IngestJob.id.desc()).limit(20).all()
     ollama = check_ollama()
     worker = get_worker_status()
@@ -267,16 +269,7 @@ def api_search():
     if not query:
         return jsonify({"error": "Query parameter 'q' is required"}), 400
 
-    filters = {
-        "doc_type": request.args.get("doc_type"),
-        "source": request.args.get("source"),
-        "min_relevance": request.args.get("min_relevance"),
-        "date_from": request.args.get("date_from"),
-        "date_to": request.args.get("date_to"),
-    }
-    filters = {k: v for k, v in filters.items() if v}
-
-    results = _search_with_fallback(query, page, "fulltext", filters)
+    results = _search_with_fallback(query, page, "fulltext", _parse_search_filters())
     return jsonify(results)
 
 
@@ -385,7 +378,6 @@ def api_external_flights():
 @api_bp.route("/worker/start", methods=["POST"])
 def api_worker_start():
     """Start the background AI analysis worker."""
-    from flask import current_app
     started = start_worker(current_app._get_current_object())
     return jsonify({"started": started, "status": get_worker_status()})
 
@@ -407,6 +399,18 @@ def api_ai_status():
     return jsonify(check_ollama())
 
 
+def _run_in_background(fn, *args):
+    """Run a function in a daemon thread with its own app context."""
+    app = current_app._get_current_object()
+    def _target():
+        with app.app_context():
+            try:
+                fn(*args)
+            except Exception as e:
+                logger.error(f"Background task {fn.__name__} failed: {e}", exc_info=True)
+    threading.Thread(target=_target, daemon=True).start()
+
+
 @api_bp.route("/ingest", methods=["POST"])
 def api_ingest():
     """Trigger ingestion from various sources."""
@@ -415,8 +419,9 @@ def api_ingest():
 
     if source == "doj":
         from app.scraper import ingest_from_doj
-        job = ingest_from_doj()
-        return jsonify({"status": "started", "job_id": job.id})
+        _run_in_background(ingest_from_doj)
+        return jsonify({"status": "started", "message": "DOJ ingestion running in background"})
+
     elif source == "local":
         directory = data.get("directory")
         if not directory:
@@ -424,6 +429,7 @@ def api_ingest():
         from app.scraper import ingest_local_pdfs
         count = ingest_local_pdfs(directory)
         return jsonify({"status": "completed", "documents_processed": count})
+
     elif source == "text":
         file_id = data.get("file_id")
         text = data.get("text")
@@ -433,15 +439,13 @@ def api_ingest():
         from app.scraper import ingest_text_content
         doc = ingest_text_content(file_id, text, metadata)
         return jsonify({"status": "ok", "document": doc.to_dict() if doc else None})
+
     elif source == "huggingface":
         max_docs = data.get("max_docs")
-        try:
-            from app.datasources import import_huggingface_dataset
-            count = import_huggingface_dataset(db, max_docs=max_docs)
-            return jsonify({"status": "completed", "documents_imported": count})
-        except Exception as e:
-            logger.error(f"HF import failed: {e}", exc_info=True)
-            return jsonify({"status": "error", "error": str(e)}), 500
+        from app.datasources import import_huggingface_dataset
+        _run_in_background(import_huggingface_dataset, db, max_docs)
+        return jsonify({"status": "started", "message": "HuggingFace import running in background"})
+
     elif source == "archive_csvs":
         try:
             from app.datasources import import_all_archive_csvs
@@ -457,14 +461,13 @@ def api_ingest():
 @api_bp.route("/data/relationships")
 def api_relationships():
     """Get entity relationship graph."""
-    from app.models import EntityRelationship
+    from app.models import EntityRelationship, Entity
     page = request.args.get("page", 1, type=int)
-    limit = request.args.get("limit", 50, type=int)
+    limit = min(request.args.get("limit", 50, type=int), _MAX_LIMIT)
     entity = request.args.get("entity", "")
 
     query = EntityRelationship.query
     if entity:
-        from app.models import Entity
         matches = Entity.query.filter(Entity.name.ilike(f"%{entity}%")).all()
         ids = [e.id for e in matches]
         if ids:
@@ -494,7 +497,7 @@ def api_local_flights():
     """Get locally imported flight records."""
     from app.models import FlightRecord
     page = request.args.get("page", 1, type=int)
-    limit = request.args.get("limit", 50, type=int)
+    limit = min(request.args.get("limit", 50, type=int), _MAX_LIMIT)
     passenger = request.args.get("passenger", "")
 
     query = FlightRecord.query
