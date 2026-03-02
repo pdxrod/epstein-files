@@ -11,7 +11,7 @@ Provides:
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from rapidfuzz import fuzz, process
 from sqlalchemy import func, or_, and_, desc, text as sql_text
@@ -19,9 +19,12 @@ from sqlalchemy import func, or_, and_, desc, text as sql_text
 from app import db
 from app.models import (
     Document, Entity, Category, Thread, NameVariant,
+    EntityRelationship, FlightRecord,
     document_entities, document_categories,
 )
-from app.nlp import resolve_name, clean_query, FuzzySearcher, KNOWN_NAMES
+from app.nlp import resolve_name, clean_query, FuzzySearcher, KNOWN_NAMES, parse_date
+
+_FTS5_SPECIAL = re.compile(r'[\"*()\-+:^]')
 
 
 def search_fulltext(query: str, page: int = 1, per_page: int = 25, filters: dict | None = None):
@@ -191,12 +194,10 @@ def search_by_date(start_date: str = None, end_date: str = None,
         query = query.filter(Document.date >= start, Document.date < end)
     else:
         if start_date:
-            from app.nlp import parse_date
             start = parse_date(start_date)
             if start:
                 query = query.filter(Document.date >= start)
         if end_date:
-            from app.nlp import parse_date
             end = parse_date(end_date)
             if end:
                 query = query.filter(Document.date <= end)
@@ -277,7 +278,7 @@ def get_interesting_documents(count: int = 20):
 
 def get_document_context(doc_id: int) -> dict:
     """Get full context for a document: thread, related docs, entities, timeline."""
-    doc = Document.query.get(doc_id)
+    doc = db.session.get(Document, doc_id)
     if not doc:
         return {}
 
@@ -292,7 +293,7 @@ def get_document_context(doc_id: int) -> dict:
     }
 
     if doc.thread_id:
-        thread = Thread.query.get(doc.thread_id)
+        thread = db.session.get(Thread, doc.thread_id)
         if thread:
             context["thread"] = thread.to_dict()
             context["thread"]["messages"] = [
@@ -318,7 +319,6 @@ def get_document_context(doc_id: int) -> dict:
         context["related_documents"] = [d.to_dict() for d in related]
 
     if doc.date:
-        from datetime import timedelta
         window_start = doc.date - timedelta(days=30)
         window_end = doc.date + timedelta(days=30)
         timeline = (
@@ -372,8 +372,6 @@ def get_date_histogram():
 
 def get_stats():
     """Get overall database statistics."""
-    from app.models import EntityRelationship, FlightRecord
-
     return {
         "total_documents": Document.query.filter_by(is_duplicate=False).count(),
         "total_emails": Document.query.filter_by(doc_type="email", is_duplicate=False).count(),
@@ -393,15 +391,17 @@ def get_stats():
 
 def _build_fts_query(query: str) -> str:
     """
-    Build an FTS5 query.
+    Build an FTS5 query string from a user query.
 
-    Multi-word queries become NEAR phrases so that "nick lees" matches
-    the two words adjacent to each other (with any punctuation/whitespace)
-    but NOT "Nick ... Cathy Lees".
-
-    Single-word queries use prefix matching ("groff*").
+    - Special FTS5 characters are stripped to prevent parse errors.
+    - Single words use prefix matching ("groff*").
+    - Multi-word queries use NEAR with a small distance (5 tokens) so
+      "palm beach" matches even when separated by punctuation, but
+      "palm ... [20 words] ... beach" does not.
     """
     query = clean_query(query)
+    # Strip FTS5 operator characters to avoid syntax errors
+    query = _FTS5_SPECIAL.sub(" ", query).strip()
     words = query.split()
 
     if not words:
@@ -411,11 +411,8 @@ def _build_fts_query(query: str) -> str:
         w = words[0]
         return f"{w}*" if len(w) > 2 else w
 
-    # Multi-word: use NEAR with distance 0 (adjacent tokens only).
-    # FTS5 tokeniser already strips punctuation, so "Nick;  lees"
-    # becomes tokens [nick, lees] which are adjacent.
     safe_words = [w for w in words if w]
-    return "NEAR(" + " ".join(safe_words) + ", 0)"
+    return "NEAR(" + " ".join(safe_words) + ", 5)"
 
 
 def _fuzzy_search_fallback(query: str, page: int, per_page: int, filters: dict):
@@ -424,16 +421,18 @@ def _fuzzy_search_fallback(query: str, page: int, per_page: int, filters: dict):
     if canonical != query:
         return search_by_name(canonical, page, per_page)
 
+    search_filter = or_(
+        Document.body.ilike(f"%{query}%"),
+        Document.title.ilike(f"%{query}%"),
+        Document.sender.ilike(f"%{query}%"),
+        Document.recipients.ilike(f"%{query}%"),
+        Document.subject.ilike(f"%{query}%"),
+    )
+
     docs = (
         Document.query.filter(
             Document.is_duplicate == False,
-            or_(
-                Document.body.ilike(f"%{query}%"),
-                Document.title.ilike(f"%{query}%"),
-                Document.sender.ilike(f"%{query}%"),
-                Document.recipients.ilike(f"%{query}%"),
-                Document.subject.ilike(f"%{query}%"),
-            ),
+            search_filter,
         )
         .order_by(desc(Document.relevance_score))
         .offset((page - 1) * per_page)
@@ -443,10 +442,7 @@ def _fuzzy_search_fallback(query: str, page: int, per_page: int, filters: dict):
 
     total = Document.query.filter(
         Document.is_duplicate == False,
-        or_(
-            Document.body.ilike(f"%{query}%"),
-            Document.title.ilike(f"%{query}%"),
-        ),
+        search_filter,
     ).count()
 
     return {
@@ -467,12 +463,10 @@ def _apply_filters(query, filters: dict):
     if filters.get("min_relevance"):
         query = query.filter(Document.relevance_score >= float(filters["min_relevance"]))
     if filters.get("date_from"):
-        from app.nlp import parse_date
         dt = parse_date(filters["date_from"])
         if dt:
             query = query.filter(Document.date >= dt)
     if filters.get("date_to"):
-        from app.nlp import parse_date
         dt = parse_date(filters["date_to"])
         if dt:
             query = query.filter(Document.date <= dt)
