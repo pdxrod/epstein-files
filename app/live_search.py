@@ -10,9 +10,11 @@ documents we can't fetch via API.
 """
 
 import logging
+import time
 from urllib.parse import quote_plus
 
 import requests
+from rapidfuzz import process as rfprocess, fuzz as rffuzz
 
 from app.nlp import resolve_name, clean_query, generate_query_variants, score_relevance
 from config import Config
@@ -30,6 +32,27 @@ _session.headers.update({
 })
 
 REQUEST_TIMEOUT = 15
+
+_cache: dict[str, tuple[float, dict]] = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _cached_get(url: str, params: dict) -> dict | None:
+    """GET with a 5-minute TTL cache to avoid hammering the external API."""
+    key = url + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    entry = _cache.get(key)
+    if entry and time.monotonic() - entry[0] < _CACHE_TTL:
+        return entry[1]
+    try:
+        resp = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            _cache[key] = (time.monotonic(), data)
+            return data
+        logger.warning(f"External API returned {resp.status_code} for {url}")
+    except Exception as e:
+        logger.warning(f"External API request failed for {url}: {e}")
+    return None
 
 
 def search_external(query: str, page: int = 1, limit: int = 25) -> dict:
@@ -98,22 +121,14 @@ def _run_search_terms(terms: list[str], page: int, limit: int) -> tuple[list, in
     all_results = []
     total = 0
     for term in terms:
-        try:
-            resp = _session.get(
-                f"{API_BASE}/search",
-                params={"q": term, "page": page, "limit": limit},
-                timeout=REQUEST_TIMEOUT,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                for doc in data.get("data", []):
-                    doc["_search_term"] = term
-                all_results.extend(data.get("data", []))
-                total = max(total, data.get("total", 0))
-                if total > 0:
-                    break  # found results, stop trying more variants
-        except Exception as e:
-            logger.warning(f"External search failed for '{term}': {e}")
+        data = _cached_get(f"{API_BASE}/search", {"q": term, "page": page, "limit": limit})
+        if data:
+            for doc in data.get("data", []):
+                doc["_search_term"] = term
+            all_results.extend(data.get("data", []))
+            total = max(total, data.get("total", 0))
+            if total > 0:
+                break  # found results, stop trying more variants
     return all_results, total
 
 
@@ -126,28 +141,16 @@ def _entity_fuzzy_lookup(query: str) -> str | None:
     if not words:
         return None
 
-    # Try each word against the entity API
     for word in words:
         if len(word) < 3:
             continue
-        try:
-            resp = _session.get(
-                f"{API_BASE}/entities",
-                params={"q": word, "type": "person", "limit": 10},
-                timeout=REQUEST_TIMEOUT,
-            )
-            if resp.status_code == 200:
-                entities = resp.json().get("data", [])
-                names = [e["name"] for e in entities if e.get("name")]
-                if names:
-                    from rapidfuzz import process as rfprocess, fuzz as rffuzz
-                    match = rfprocess.extractOne(
-                        query, names, scorer=rffuzz.WRatio
-                    )
-                    if match and match[1] >= 65:
-                        return match[0]
-        except Exception:
-            pass
+        data = _cached_get(f"{API_BASE}/entities", {"q": word, "type": "person", "limit": 10})
+        if data:
+            names = [e["name"] for e in data.get("data", []) if e.get("name")]
+            if names:
+                match = rfprocess.extractOne(query, names, scorer=rffuzz.WRatio)
+                if match and match[1] >= 65:
+                    return match[0]
     return None
 
 
@@ -175,26 +178,18 @@ def search_external_documents(query: str, doc_type: str = None,
     if source:
         params["source"] = source
 
-    try:
-        resp = _session.get(
-            f"{API_BASE}/documents",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            items = [_normalise_external_doc(d) for d in data.get("data", [])]
-            return {
-                "items": items,
-                "total": data.get("total", 0),
-                "page": data.get("page", page),
-                "pages": (data.get("total", 0) + limit - 1) // limit,
-                "query": query,
-                "source": "epsteininvestigation.org",
-                "external": True,
-            }
-    except Exception as e:
-        logger.warning(f"External document search failed: {e}")
+    data = _cached_get(f"{API_BASE}/documents", params)
+    if data:
+        items = [_normalise_external_doc(d) for d in data.get("data", [])]
+        return {
+            "items": items,
+            "total": data.get("total", 0),
+            "page": data.get("page", page),
+            "pages": (data.get("total", 0) + limit - 1) // limit,
+            "query": query,
+            "source": "epsteininvestigation.org",
+            "external": True,
+        }
 
     return _empty_result(query)
 
@@ -210,30 +205,24 @@ def search_external_entities(query: str, entity_type: str = None,
         params["type"] = entity_type
 
     all_entities = []
-    for term in {query, resolved}:
-        params["q"] = term
-        try:
-            resp = _session.get(
-                f"{API_BASE}/entities",
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                all_entities.extend(data.get("data", []))
-        except Exception as e:
-            logger.warning(f"External entity search failed for '{term}': {e}")
+    total = 0
+    for term in _unique_ordered([query, resolved]):
+        data = _cached_get(f"{API_BASE}/entities", {**params, "q": term})
+        if data:
+            all_entities.extend(data.get("data", []))
+            total = max(total, data.get("total", 0))
 
     seen = set()
     deduped = []
     for ent in all_entities:
-        if ent["id"] not in seen:
-            seen.add(ent["id"])
+        ent_id = ent.get("id")
+        if ent_id not in seen:
+            seen.add(ent_id)
             deduped.append(ent)
 
     return {
         "items": deduped[:limit],
-        "total": len(deduped),
+        "total": total,
         "page": page,
         "query": query,
         "resolved_name": resolved if resolved != query else None,
@@ -256,42 +245,25 @@ def search_external_flights(passenger: str = None, airport: str = None,
     if date_to:
         params["date_to"] = date_to
 
-    try:
-        resp = _session.get(
-            f"{API_BASE}/flights",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "items": data.get("data", []),
-                "total": data.get("total", 0),
-                "page": data.get("page", page),
-                "pages": (data.get("total", 0) + limit - 1) // limit,
-                "source": "epsteininvestigation.org",
-                "external": True,
-            }
-    except Exception as e:
-        logger.warning(f"External flight search failed: {e}")
+    data = _cached_get(f"{API_BASE}/flights", params)
+    if data:
+        return {
+            "items": data.get("data", []),
+            "total": data.get("total", 0),
+            "page": data.get("page", page),
+            "pages": (data.get("total", 0) + limit - 1) // limit,
+            "source": "epsteininvestigation.org",
+            "external": True,
+        }
 
     return _empty_result("")
 
 
 def get_external_document(slug: str) -> dict | None:
     """Fetch a single document by slug from the external API."""
-    try:
-        resp = _session.get(
-            f"{API_BASE}/documents",
-            params={"q": slug, "limit": 1},
-            timeout=REQUEST_TIMEOUT,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("data"):
-                return _normalise_external_doc(data["data"][0])
-    except Exception as e:
-        logger.warning(f"External document fetch failed for '{slug}': {e}")
+    data = _cached_get(f"{API_BASE}/documents", {"q": slug, "limit": 1})
+    if data and data.get("data"):
+        return _normalise_external_doc(data["data"][0])
     return None
 
 
