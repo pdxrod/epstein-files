@@ -1,4 +1,5 @@
 import logging
+import os
 import sqlite3
 
 from flask import Flask
@@ -12,12 +13,16 @@ db = SQLAlchemy()
 migrate = Migrate()
 
 
+logger = logging.getLogger(__name__)
+
+
 @event.listens_for(Engine, "connect")
 def _set_sqlite_wal(dbapi_connection, connection_record):
-    """Enable WAL journal mode for SQLite so concurrent reads and writes don't block."""
+    """Enable WAL + synchronous=NORMAL for SQLite: concurrent reads/writes, safe and fast."""
     if isinstance(dbapi_connection, sqlite3.Connection):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.close()
 
 
@@ -25,18 +30,10 @@ def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
 
-    # Quiet logging: suppress the per-request access log lines and
-    # chatty libraries, but keep warnings and our own app.* loggers.
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)
-    logging.getLogger("alembic").setLevel(logging.WARNING)
-    logging.getLogger("datasets").setLevel(logging.WARNING)
+    _configure_logging()
 
-    app_log = logging.getLogger("app")
-    if not app_log.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
-        app_log.addHandler(handler)
-    app_log.setLevel(logging.INFO)
+    os.makedirs(app.config["DATA_DIR"], exist_ok=True)
+    os.makedirs(app.config["PDF_DIR"], exist_ok=True)
 
     db.init_app(app)
     migrate.init_app(app, db)
@@ -51,6 +48,19 @@ def create_app(config_class=Config):
         _ensure_fts_tables(db)
 
     return app
+
+
+def _configure_logging():
+    """Suppress noisy third-party loggers; set up a consistent format for app logs."""
+    for noisy in ("werkzeug", "alembic", "datasets", "requests", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    app_log = logging.getLogger("app")
+    if not app_log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        app_log.addHandler(handler)
+    app_log.setLevel(logging.INFO)
 
 
 def _ensure_fts_tables(db):
@@ -79,5 +89,6 @@ def _ensure_fts_tables(db):
             )
         )
         db.session.commit()
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to create FTS tables: {e}", exc_info=True)
         db.session.rollback()
