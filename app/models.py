@@ -1,4 +1,5 @@
 import datetime
+from datetime import timezone
 from app import db
 
 document_entities = db.Table(
@@ -17,7 +18,7 @@ document_links = db.Table(
     "document_links",
     db.Column("source_id", db.Integer, db.ForeignKey("documents.id"), primary_key=True),
     db.Column("target_id", db.Integer, db.ForeignKey("documents.id"), primary_key=True),
-    db.Column("link_type", db.String(50)),
+    db.Column("link_type", db.String(50), index=True),
 )
 
 
@@ -58,7 +59,7 @@ class Document(db.Model):
     ai_summary = db.Column(db.Text)
     ai_connections = db.Column(db.Text)
 
-    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.datetime.now(timezone.utc))
     processed = db.Column(db.Boolean, default=False, index=True)
 
     entities = db.relationship("Entity", secondary=document_entities, back_populates="documents")
@@ -91,6 +92,8 @@ class Document(db.Model):
             "categories": [c.to_dict() for c in self.categories],
             "thread_id": self.thread_id,
             "is_duplicate": self.is_duplicate,
+            "ai_summary": self.ai_summary,
+            "ai_connections": self.ai_connections,
         }
 
 
@@ -106,6 +109,8 @@ class Entity(db.Model):
     mention_count = db.Column(db.Integer, default=0)
 
     documents = db.relationship("Document", secondary=document_entities, back_populates="entities")
+
+    __table_args__ = (db.Index("ix_entity_name_type", "name", "entity_type"),)
 
     def to_dict(self):
         return {
@@ -226,6 +231,7 @@ class FlightRecord(db.Model):
             "departure": self.departure_airport or self.departure_code,
             "arrival": self.arrival_airport or self.arrival_code,
             "passengers": self.passengers,
+            "source": self.source,
         }
 
 
@@ -241,3 +247,16 @@ class IngestJob(db.Model):
     started_at = db.Column(db.DateTime)
     completed_at = db.Column(db.DateTime)
     error = db.Column(db.Text)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "source": self.source,
+            "url": self.url,
+            "status": self.status,
+            "documents_found": self.documents_found,
+            "documents_processed": self.documents_processed,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "error": self.error,
+        }
