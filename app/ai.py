@@ -25,6 +25,32 @@ logger = logging.getLogger(__name__)
 _cached_model: str | None = None
 _cached_models_list: list[str] = []
 
+# Module-level constants — avoids per-call reconstruction
+_OLLAMA_URL: str = Config.OLLAMA_URL
+
+_FAMILY_ORDER = [
+    "llama3.2", "llama3.1", "llama3",
+    "qwen2.5", "qwen2",
+    "gemma2",
+    "mistral",
+    "phi3",
+    "gemma", "phi",
+    "llama2", "llama",
+]
+
+_SIZE_SCORES = {
+    "70b": 70, "32b": 32, "22b": 22, "20b": 20,
+    "13b": 13, "8b": 8, "7b": 7, "3b": 3, "2b": 2,
+}
+
+_LARGE_MODEL_SIZES = ("70b", "32b", "22b")
+_MEDIUM_MODEL_SIZES = ("20b", "13b")
+
+# Precompiled patterns for _parse_json_response
+_RE_FENCE_OPEN  = re.compile(r"^```(?:json)?\s*")
+_RE_FENCE_CLOSE = re.compile(r"\s*```$")
+_RE_JSON_OBJECT = re.compile(r"\{[\s\S]*\}")
+
 _DEFAULT_CATEGORIES = [
     "Trafficking",
     "Sexual Abuse",
@@ -43,39 +69,19 @@ _DEFAULT_CATEGORIES = [
 ]
 
 
-def _ollama_url() -> str:
-    return Config.OLLAMA_URL
-
-
 def _model_score(name: str) -> tuple[int, int]:
     """Score a model by family recency then size. Higher = preferred."""
     name_l = name.lower()
-    # Newer instruction-tuned families first — they produce better JSON
-    family_order = [
-        "llama3.2", "llama3.1", "llama3",
-        "qwen2.5", "qwen2",
-        "gemma2",
-        "mistral",
-        "phi3",
-        "gemma", "phi",
-        "llama2", "llama",
-    ]
     family_score = 0
-    for i, fam in enumerate(family_order):
+    for i, fam in enumerate(_FAMILY_ORDER):
         if fam in name_l:
-            family_score = len(family_order) - i
+            family_score = len(_FAMILY_ORDER) - i
             break
-
-    size_scores = {
-        "70b": 70, "32b": 32, "22b": 22, "20b": 20,
-        "13b": 13, "8b": 8, "7b": 7, "3b": 3, "2b": 2,
-    }
     size_score = 0
-    for size_str, score in size_scores.items():
+    for size_str, score in _SIZE_SCORES.items():
         if size_str in name_l:
             size_score = score
             break
-
     return (family_score, size_score)
 
 
@@ -87,7 +93,7 @@ def _get_model() -> str:
     if _cached_model:
         return _cached_model
     try:
-        resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
+        resp = requests.get(f"{_OLLAMA_URL}/api/tags", timeout=5)
         if resp.status_code == 200:
             _cached_models_list = [m["name"] for m in resp.json().get("models", [])]
             if _cached_models_list:
@@ -102,9 +108,9 @@ def _get_model() -> str:
 def _doc_context_chars(model: str) -> int:
     """Return how many document chars to send, scaled to model capacity."""
     name_l = model.lower()
-    if any(s in name_l for s in ["70b", "32b", "22b"]):
+    if any(s in name_l for s in _LARGE_MODEL_SIZES):
         return 8000
-    if any(s in name_l for s in ["20b", "13b"]):
+    if any(s in name_l for s in _MEDIUM_MODEL_SIZES):
         return 5000
     return 3000
 
@@ -215,18 +221,18 @@ def check_ollama() -> dict:
     models = _cached_models_list
     if not models:
         try:
-            resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
+            resp = requests.get(f"{_OLLAMA_URL}/api/tags", timeout=5)
             if resp.status_code == 200:
                 models = [m["name"] for m in resp.json().get("models", [])]
         except requests.ConnectionError:
-            pass
+            logger.info("Ollama is not reachable at %s", _OLLAMA_URL)
         except Exception as e:
             logger.warning(f"Ollama check error: {e}")
 
     if models:
         return {
             "status": "running",
-            "url": _ollama_url(),
+            "url": _OLLAMA_URL,
             "models": models,
             "configured_model": model,
             "model_available": any(model.split(":")[0] in m for m in models),
@@ -234,7 +240,7 @@ def check_ollama() -> dict:
 
     return {
         "status": "not_running",
-        "url": _ollama_url(),
+        "url": _OLLAMA_URL,
         "models": [],
         "configured_model": model,
         "model_available": False,
@@ -247,7 +253,7 @@ def _query_ollama(prompt: str, system: str = SYSTEM_PROMPT, temperature: float =
     model = model or _get_model()
     try:
         resp = requests.post(
-            f"{_ollama_url()}/api/chat",
+            f"{_OLLAMA_URL}/api/chat",
             json={
                 "model": model,
                 "messages": [
@@ -280,8 +286,8 @@ def _parse_json_response(text: str) -> dict | None:
         return None
 
     # Strip markdown code fences
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-    text = re.sub(r"\s*```$", "", text.strip())
+    text = _RE_FENCE_OPEN.sub("", text.strip())
+    text = _RE_FENCE_CLOSE.sub("", text.strip())
 
     # Try direct parse
     try:
@@ -290,7 +296,7 @@ def _parse_json_response(text: str) -> dict | None:
         pass
 
     # Try to find a JSON object in the response
-    match = re.search(r"\{[\s\S]*\}", text)
+    match = _RE_JSON_OBJECT.search(text)
     if match:
         try:
             return json.loads(match.group())
@@ -299,6 +305,18 @@ def _parse_json_response(text: str) -> dict | None:
 
     logger.warning(f"Could not parse JSON from LLM response: {text[:200]}")
     return None
+
+
+def _query_with_retry(prompt: str, temperature: float, retry_temperature: float,
+                      log_label: str, model: str | None = None) -> dict | None:
+    """Send a prompt to Ollama and retry once at a lower temperature on JSON parse failure."""
+    raw = _query_ollama(prompt, temperature=temperature, model=model)
+    result = _parse_json_response(raw)
+    if result is None:
+        logger.debug(f"{log_label} JSON parse failed, retrying at temperature {retry_temperature}…")
+        raw = _query_ollama(prompt, temperature=retry_temperature, model=model)
+        result = _parse_json_response(raw)
+    return result
 
 
 def analyse_document(text: str, file_id: str = "", source: str = "",
@@ -326,13 +344,10 @@ def analyse_document(text: str, file_id: str = "", source: str = "",
         known_categories=", ".join(cats),
     )
 
-    raw = _query_ollama(prompt, model=model)
-    result = _parse_json_response(raw)
-
-    if result is None:
-        logger.debug(f"JSON parse failed for {file_id}, retrying...")
-        raw = _query_ollama(prompt, temperature=0.05, model=model)
-        result = _parse_json_response(raw)
+    result = _query_with_retry(
+        prompt, temperature=0.1, retry_temperature=0.05,
+        log_label=f"analyse_document({file_id})", model=model,
+    )
 
     if result:
         # Normalise and validate
@@ -368,13 +383,10 @@ def discover_categories(summaries: list[dict],
         summaries=summary_text,
     )
 
-    raw = _query_ollama(prompt, temperature=0.3)
-    result = _parse_json_response(raw)
-
-    if result is None:
-        logger.debug("Category discovery JSON parse failed, retrying...")
-        raw = _query_ollama(prompt, temperature=0.2)
-        result = _parse_json_response(raw)
+    result = _query_with_retry(
+        prompt, temperature=0.3, retry_temperature=0.2,
+        log_label="discover_categories",
+    )
 
     if result and "new_categories" in result:
         return result["new_categories"]
