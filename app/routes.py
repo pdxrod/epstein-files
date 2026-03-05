@@ -23,7 +23,7 @@ from app.live_search import (
     search_external, search_external_documents, search_external_entities,
     search_external_flights, get_external_document,
 )
-from app.models import Document, Category, IngestJob
+from app.models import Document, Category, IngestJob, Entity, EntityRelationship, FlightRecord
 from app.ai import check_ollama
 from app.worker import start_worker, stop_worker, get_worker_status
 
@@ -33,10 +33,20 @@ main_bp = Blueprint("main", __name__)
 api_bp = Blueprint("api", __name__)
 
 _MAX_LIMIT = 200
+_AGE_GATE_ALLOWED = {"main.age_gate", "main.verify_age", "static"}
+_FALLBACK_SEARCH_QUERY = "epstein victim trafficking"
 
 
 def _age_verified():
     return session.get("age_verified", False)
+
+
+def _get_ai_categories():
+    return (
+        Category.query.filter_by(is_system=False)
+        .order_by(Category.document_count.desc())
+        .all()
+    )
 
 
 def _parse_search_filters() -> dict:
@@ -68,7 +78,7 @@ def _search_with_fallback(query, page, search_type, filters):
     else:
         results = search_fulltext(query, page=page, filters=filters)
 
-    if not results.get("items"):
+    if not results.get("items") and search_type != "date":
         logger.info(f"No local results for '{query}', querying external API…")
         ext = search_external(query, page=page)
         if ext.get("items"):
@@ -81,8 +91,7 @@ def _search_with_fallback(query, page, search_type, filters):
 
 @main_bp.before_request
 def check_age_gate():
-    allowed = {"main.age_gate", "main.verify_age", "static"}
-    if request.endpoint not in allowed and not _age_verified():
+    if request.endpoint not in _AGE_GATE_ALLOWED and not _age_verified():
         return redirect(url_for("main.age_gate"))
 
 
@@ -107,15 +116,10 @@ def index():
     categories = get_all_categories()
     has_data = stats.get("total_documents", 0) > 0
     worker = get_worker_status()
-    ai_categories = (
-        Category.query.filter_by(is_system=False)
-        .order_by(Category.document_count.desc())
-        .all()
-    )
     return render_template(
         "index.html", stats=stats, categories=categories,
         has_data=has_data, worker=worker,
-        ai_categories=[c.to_dict() for c in ai_categories],
+        ai_categories=[c.to_dict() for c in _get_ai_categories()],
     )
 
 
@@ -184,7 +188,7 @@ def category_view(slug):
 def random_page():
     docs = get_interesting_documents(count=20)
     if not docs:
-        ext = search_external("epstein victim trafficking", page=1, limit=20)
+        ext = search_external(_FALLBACK_SEARCH_QUERY, page=1, limit=20)
         docs = ext.get("items", [])
     return render_template("random.html", documents=docs)
 
@@ -243,14 +247,9 @@ def admin_page():
     jobs = IngestJob.query.order_by(IngestJob.id.desc()).limit(20).all()
     ollama = check_ollama()
     worker = get_worker_status()
-    ai_categories = (
-        Category.query.filter_by(is_system=False)
-        .order_by(Category.document_count.desc())
-        .all()
-    )
     return render_template(
         "admin.html", stats=stats, jobs=jobs,
-        ollama=ollama, worker=worker, ai_categories=ai_categories,
+        ollama=ollama, worker=worker, ai_categories=_get_ai_categories(),
     )
 
 
@@ -319,7 +318,7 @@ def api_random():
     count = request.args.get("count", 20, type=int)
     docs = get_interesting_documents(count=min(count, 50))
     if not docs:
-        ext = search_external("epstein victim trafficking", limit=count)
+        ext = search_external(_FALLBACK_SEARCH_QUERY, limit=count)
         return jsonify(ext.get("items", []))
     return jsonify(docs)
 
@@ -427,8 +426,8 @@ def api_ingest():
         if not directory:
             return jsonify({"error": "directory is required for local source"}), 400
         from app.scraper import ingest_local_pdfs
-        count = ingest_local_pdfs(directory)
-        return jsonify({"status": "completed", "documents_processed": count})
+        _run_in_background(ingest_local_pdfs, directory)
+        return jsonify({"status": "started", "message": "Local PDF ingestion running in background"})
 
     elif source == "text":
         file_id = data.get("file_id")
@@ -461,7 +460,6 @@ def api_ingest():
 @api_bp.route("/data/relationships")
 def api_relationships():
     """Get entity relationship graph."""
-    from app.models import EntityRelationship, Entity
     page = request.args.get("page", 1, type=int)
     limit = min(request.args.get("limit", 50, type=int), _MAX_LIMIT)
     entity = request.args.get("entity", "")
@@ -495,7 +493,6 @@ def api_relationships():
 @api_bp.route("/data/flights")
 def api_local_flights():
     """Get locally imported flight records."""
-    from app.models import FlightRecord
     page = request.args.get("page", 1, type=int)
     limit = min(request.args.get("limit", 50, type=int), _MAX_LIMIT)
     passenger = request.args.get("passenger", "")
