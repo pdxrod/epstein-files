@@ -41,6 +41,17 @@ def _age_verified():
     return session.get("age_verified", False)
 
 
+def _normalise_external_entity(e: dict) -> dict:
+    """Map an external API entity to the internal entity dict shape."""
+    return {
+        "id": e.get("id"),
+        "name": e.get("name"),
+        "canonical_name": e.get("name"),
+        "entity_type": "PERSON",
+        "mention_count": e.get("document_count", 0),
+    }
+
+
 def _get_ai_categories():
     return (
         Category.query.filter_by(is_system=False)
@@ -63,8 +74,6 @@ def _parse_search_filters() -> dict:
 
 def _search_with_fallback(query, page, search_type, filters):
     """Search local DB first; if empty, fall back to external API."""
-    results = {"items": [], "total": 0, "page": page, "pages": 0}
-
     if search_type == "name":
         results = search_by_name(query, page=page)
     elif search_type == "date":
@@ -91,6 +100,8 @@ def _search_with_fallback(query, page, search_type, filters):
 
 @main_bp.before_request
 def check_age_gate():
+    if request.endpoint is None:
+        return  # let Flask's 404 handler deal with unmatched routes
     if request.endpoint not in _AGE_GATE_ALLOWED and not _age_verified():
         return redirect(url_for("main.age_gate"))
 
@@ -208,16 +219,7 @@ def people_page():
         ext = search_external_entities("", entity_type="person", page=page)
         if ext.get("items"):
             entities = {
-                "items": [
-                    {
-                        "id": e.get("id"),
-                        "name": e.get("name"),
-                        "canonical_name": e.get("name"),
-                        "entity_type": "PERSON",
-                        "mention_count": e.get("document_count", 0),
-                    }
-                    for e in ext["items"]
-                ],
+                "items": [_normalise_external_entity(e) for e in ext["items"]],
                 "total": ext.get("total", 0),
                 "page": page,
                 "pages": ext.get("pages", 0),
@@ -407,7 +409,7 @@ def _run_in_background(fn, *args):
                 fn(*args)
             except Exception as e:
                 logger.error(f"Background task {fn.__name__} failed: {e}", exc_info=True)
-    threading.Thread(target=_target, daemon=True).start()
+    threading.Thread(target=_target, daemon=True, name=f"bg-{fn.__name__}").start()
 
 
 @api_bp.route("/ingest", methods=["POST"])
@@ -416,8 +418,10 @@ def api_ingest():
     data = request.get_json() or {}
     source = data.get("source", "doj")
 
+    from app.scraper import ingest_from_doj, ingest_local_pdfs, ingest_text_content
+    from app.datasources import import_huggingface_dataset, import_all_archive_csvs
+
     if source == "doj":
-        from app.scraper import ingest_from_doj
         _run_in_background(ingest_from_doj)
         return jsonify({"status": "started", "message": "DOJ ingestion running in background"})
 
@@ -425,7 +429,6 @@ def api_ingest():
         directory = data.get("directory")
         if not directory:
             return jsonify({"error": "directory is required for local source"}), 400
-        from app.scraper import ingest_local_pdfs
         _run_in_background(ingest_local_pdfs, directory)
         return jsonify({"status": "started", "message": "Local PDF ingestion running in background"})
 
@@ -435,24 +438,17 @@ def api_ingest():
         metadata = data.get("metadata", {})
         if not file_id or not text:
             return jsonify({"error": "file_id and text are required"}), 400
-        from app.scraper import ingest_text_content
         doc = ingest_text_content(file_id, text, metadata)
         return jsonify({"status": "ok", "document": doc.to_dict() if doc else None})
 
     elif source == "huggingface":
         max_docs = data.get("max_docs")
-        from app.datasources import import_huggingface_dataset
         _run_in_background(import_huggingface_dataset, db, max_docs)
         return jsonify({"status": "started", "message": "HuggingFace import running in background"})
 
     elif source == "archive_csvs":
-        try:
-            from app.datasources import import_all_archive_csvs
-            results = import_all_archive_csvs(db)
-            return jsonify({"status": "completed", "results": results})
-        except Exception as e:
-            logger.error(f"CSV import failed: {e}", exc_info=True)
-            return jsonify({"status": "error", "error": str(e)}), 500
+        _run_in_background(import_all_archive_csvs, db)
+        return jsonify({"status": "started", "message": "Archive CSV import running in background"})
 
     return jsonify({"error": f"Unknown source: {source}"}), 400
 
