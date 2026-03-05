@@ -25,8 +25,6 @@ logger = logging.getLogger(__name__)
 _cached_model: str | None = None
 _cached_models_list: list[str] = []
 
-_QUERY_TIMEOUT = 120  # seconds; increase for 70B+ models
-
 _DEFAULT_CATEGORIES = [
     "Trafficking",
     "Sexual Abuse",
@@ -263,7 +261,7 @@ def _query_ollama(prompt: str, system: str = SYSTEM_PROMPT, temperature: float =
                     "num_predict": 4096,
                 },
             },
-            timeout=_QUERY_TIMEOUT,
+            timeout=Config.OLLAMA_TIMEOUT,
         )
         if resp.status_code == 200:
             return resp.json().get("message", {}).get("content", "")

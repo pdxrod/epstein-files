@@ -1,32 +1,59 @@
+import logging
 import os
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
+logger = logging.getLogger(__name__)
+
 
 def _int(key, default):
-    return int(os.environ.get(key, default))
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        raise ValueError(f"Environment variable {key}={val!r} is not a valid integer")
 
 
 def _float(key, default):
-    return float(os.environ.get(key, default))
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        raise ValueError(f"Environment variable {key}={val!r} is not a valid float")
 
 
 class Config:
     # ── Server ────────────────────────────────────────────────
     PORT = _int("PORT", 5555)
-    SECRET_KEY = os.environ.get("SECRET_KEY", os.urandom(32).hex())
+
+    _secret = os.environ.get("SECRET_KEY")
+    if not _secret:
+        logger.warning(
+            "SECRET_KEY is not set — using a random key. "
+            "All sessions will be lost on restart. "
+            "Set SECRET_KEY in your environment for persistent sessions."
+        )
+        _secret = os.urandom(32).hex()
+    SECRET_KEY = _secret
 
     # ── Database ──────────────────────────────────────────────
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         "DATABASE_URL", f"sqlite:///{os.path.join(BASE_DIR, 'data', 'epstein.db')}"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # Allow SQLite to be used from multiple threads (background worker + web requests)
+    SQLALCHEMY_ENGINE_OPTIONS = {"connect_args": {"check_same_thread": False}}
     DATA_DIR = os.path.join(BASE_DIR, "data")
     PDF_DIR = os.path.join(DATA_DIR, "pdfs")
 
     # ── Ollama / AI ───────────────────────────────────────────
     OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "")  # empty = auto-detect
+    OLLAMA_TIMEOUT = _int("OLLAMA_TIMEOUT", 120)
 
     # ── External APIs ─────────────────────────────────────────
     ARCHIVE_API_URL = os.environ.get(
@@ -50,34 +77,3 @@ class Config:
     # ── Deployment (read by Dockerfile / docker-compose) ──────
     GUNICORN_WORKERS = _int("GUNICORN_WORKERS", 4)
     GUNICORN_TIMEOUT = _int("GUNICORN_TIMEOUT", 120)
-
-    # ── Celery (optional, for future use) ─────────────────────
-    CELERY_BROKER_URL = os.environ.get(
-        "CELERY_BROKER_URL", "redis://localhost:6379/0"
-    )
-    CELERY_RESULT_BACKEND = os.environ.get(
-        "CELERY_RESULT_BACKEND", "redis://localhost:6379/0"
-    )
-
-    # ── NLP reference data ────────────────────────────────────
-    RELEVANCE_TOPICS = [
-        "trafficking", "sexual abuse", "child exploitation", "prostitution",
-        "blackmail", "intelligence services", "financial crime",
-        "money laundering", "corruption", "coercion", "underage",
-        "minor", "victim",
-    ]
-
-    KNOWN_ASSOCIATES = [
-        "Ghislaine Maxwell", "Jean-Luc Brunel", "Sarah Kellen",
-        "Nadia Marcinkova", "Lesley Groff", "Adriana Ross",
-        "Les Wexner", "Alan Dershowitz", "Prince Andrew",
-        "Bill Clinton", "Donald Trump", "Bill Gates",
-        "Leon Black", "Glenn Dubin", "Virginia Giuffre",
-        "Lex Wexner", "Eva Dubin", "Harvey Weinstein",
-    ]
-
-    LOCATIONS = [
-        "Little St. James", "Great St. James", "Zorro Ranch",
-        "71st Street", "New York", "Palm Beach", "Paris",
-        "Virgin Islands", "New Mexico",
-    ]

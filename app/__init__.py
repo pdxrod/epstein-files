@@ -1,12 +1,24 @@
 import logging
+import sqlite3
 
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from config import Config
 
 db = SQLAlchemy()
 migrate = Migrate()
+
+
+@event.listens_for(Engine, "connect")
+def _set_sqlite_wal(dbapi_connection, connection_record):
+    """Enable WAL journal mode for SQLite so concurrent reads and writes don't block."""
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
 
 
 def create_app(config_class=Config):
