@@ -23,6 +23,26 @@ logger = logging.getLogger(__name__)
 
 _ARCHIVE_BASE = Config.ARCHIVE_API_URL.replace("/api/v1", "")
 
+_ENTITY_TYPE_MAP = {
+    "PERSON": "PERSON",
+    "ORGANIZATION": "ORG",
+    "ORG": "ORG",
+    "LOCATION": "LOCATION",
+    "LOC": "LOCATION",
+    "AIRCRAFT": "AIRCRAFT",
+    "PROPERTY": "LOCATION",
+}
+
+_API_DOC_TYPE_MAP = {
+    "foia_release": "foia",
+    "court_filing": "legal",
+    "email": "email",
+    "deposition": "deposition",
+    "fbi_file": "fbi",
+    "flight_log": "flight_log",
+    "photograph": "photograph",
+}
+
 ARCHIVE_CSV_URLS = {
     "entities": f"{_ARCHIVE_BASE}/api/download/entities",
     "flights": f"{_ARCHIVE_BASE}/api/download/flights",
@@ -166,7 +186,7 @@ def import_archive_flights(db):
             try:
                 flight_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
             except (ValueError, TypeError):
-                pass
+                logger.debug(f"Could not parse flight date {date_str!r}")
 
         record = FlightRecord(
             flight_date=flight_date,
@@ -373,6 +393,9 @@ def _import_via_api_bulk(db, batch_size=100, max_docs=None):
     page = 1
     per_page = 100
 
+    # Pre-load existing file_ids to avoid per-row DB lookups
+    existing_ids = {r[0] for r in db.session.query(Document.file_id).all()}
+
     while count < max_docs:
         try:
             resp = requests.get(
@@ -394,11 +417,7 @@ def _import_via_api_bulk(db, batch_size=100, max_docs=None):
                     break
 
                 file_id = str(item.get("slug") or item.get("id", ""))
-                if not file_id:
-                    continue
-
-                existing = Document.query.filter_by(file_id=file_id).first()
-                if existing:
+                if not file_id or file_id in existing_ids:
                     continue
 
                 excerpt = item.get("excerpt") or ""
@@ -415,6 +434,7 @@ def _import_via_api_bulk(db, batch_size=100, max_docs=None):
                     processed=False,
                 )
                 db.session.add(doc)
+                existing_ids.add(file_id)
                 count += 1
 
             db.session.commit()
@@ -470,13 +490,20 @@ def _enrich_from_search(db, api_base, term, max_pages=5):
             if not items:
                 break
 
+            # Batch-load all existing docs for this page of results
+            page_slugs = [str(i.get("slug") or "") for i in items if i.get("slug")]
+            existing_docs = {
+                d.file_id: d
+                for d in Document.query.filter(Document.file_id.in_(page_slugs)).all()
+            }
+
             for item in items:
                 slug = str(item.get("slug") or "")
                 excerpt = item.get("excerpt") or ""
                 if not slug or len(excerpt) < 50:
                     continue
 
-                doc = Document.query.filter_by(file_id=slug).first()
+                doc = existing_docs.get(slug)
                 if doc:
                     if not doc.body or len(doc.body) < len(excerpt):
                         doc.body = excerpt
@@ -505,24 +532,22 @@ def _enrich_from_search(db, api_base, term, max_pages=5):
 
 
 def _api_type_to_doc_type(raw: str) -> str:
-    mapping = {
-        "foia_release": "foia",
-        "court_filing": "legal",
-        "email": "email",
-        "deposition": "deposition",
-        "fbi_file": "fbi",
-        "flight_log": "flight_log",
-        "photograph": "photograph",
-    }
-    return mapping.get(raw, "document")
+    return _API_DOC_TYPE_MAP.get(raw, "document")
 
 
 def import_all_archive_csvs(db):
     """Import all structured data from epsteininvestigation.org."""
     results = {}
-    results["entities"] = import_archive_entities(db)
-    results["relationships"] = import_archive_relationships(db)
-    results["flights"] = import_archive_flights(db)
+    for name, fn in [
+        ("entities", import_archive_entities),
+        ("relationships", import_archive_relationships),
+        ("flights", import_archive_flights),
+    ]:
+        try:
+            results[name] = fn(db)
+        except Exception as e:
+            logger.error(f"import_all_archive_csvs: {name} import failed: {e}", exc_info=True)
+            results[name] = 0
     return results
 
 
@@ -543,17 +568,7 @@ def _get_or_create_entity(db, name, etype="PERSON", cache=None):
 
 
 def _normalise_entity_type(raw: str) -> str:
-    raw = raw.strip().upper()
-    mapping = {
-        "PERSON": "PERSON",
-        "ORGANIZATION": "ORG",
-        "ORG": "ORG",
-        "LOCATION": "LOCATION",
-        "LOC": "LOCATION",
-        "AIRCRAFT": "AIRCRAFT",
-        "PROPERTY": "LOCATION",
-    }
-    return mapping.get(raw, raw)
+    return _ENTITY_TYPE_MAP.get(raw.strip().upper(), raw.strip().upper())
 
 
 def _filename_to_file_id(filename: str) -> str:
