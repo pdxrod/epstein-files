@@ -11,7 +11,6 @@ documents we can't fetch via API.
 
 import logging
 import time
-from urllib.parse import quote_plus
 
 import requests
 from rapidfuzz import process as rfprocess, fuzz as rffuzz
@@ -24,6 +23,7 @@ logger = logging.getLogger(__name__)
 API_BASE = Config.ARCHIVE_API_URL
 JMAIL_BASE = Config.JMAIL_BASE_URL
 DOJ_BASE = Config.DOJ_BASE_URL
+REQUEST_TIMEOUT = Config.EXTERNAL_REQUEST_TIMEOUT
 
 _session = requests.Session()
 _session.headers.update({
@@ -31,10 +31,9 @@ _session.headers.update({
     "Accept": "application/json",
 })
 
-REQUEST_TIMEOUT = 15
-
 _cache: dict[str, tuple[float, dict]] = {}
-_CACHE_TTL = 300  # 5 minutes
+_CACHE_TTL = 300        # 5 minutes
+_CACHE_MAX_SIZE = 500   # evict oldest entry beyond this limit
 
 
 def _cached_get(url: str, params: dict) -> dict | None:
@@ -47,6 +46,10 @@ def _cached_get(url: str, params: dict) -> dict | None:
         resp = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
         if resp.status_code == 200:
             data = resp.json()
+            if len(_cache) >= _CACHE_MAX_SIZE:
+                # Evict the oldest entry by insertion timestamp
+                oldest_key = min(_cache, key=lambda k: _cache[k][0])
+                del _cache[oldest_key]
             _cache[key] = (time.monotonic(), data)
             return data
         logger.warning(f"External API returned {resp.status_code} for {url}")
@@ -211,6 +214,8 @@ def search_external_entities(query: str, entity_type: str = None,
         if data:
             all_entities.extend(data.get("data", []))
             total = max(total, data.get("total", 0))
+            if total > 0:
+                break  # found results, stop trying more variants
 
     seen = set()
     deduped = []
@@ -261,9 +266,21 @@ def search_external_flights(passenger: str = None, airport: str = None,
 
 def get_external_document(slug: str) -> dict | None:
     """Fetch a single document by slug from the external API."""
+    # Try direct slug endpoint first
+    data = _cached_get(f"{API_BASE}/documents/{slug}", {})
+    if data and not data.get("error"):
+        return _normalise_external_doc(data)
+
+    # Fall back to search and verify the slug matches
     data = _cached_get(f"{API_BASE}/documents", {"q": slug, "limit": 1})
     if data and data.get("data"):
-        return _normalise_external_doc(data["data"][0])
+        doc = data["data"][0]
+        if doc.get("slug", "").lower() != slug.lower():
+            logger.warning(
+                f"get_external_document: slug mismatch — requested {slug!r}, "
+                f"got {doc.get('slug')!r}"
+            )
+        return _normalise_external_doc(doc)
     return None
 
 
@@ -273,12 +290,12 @@ def build_jmail_url(file_id: str) -> str:
     return f"{JMAIL_BASE}/thread/{slug}"
 
 
-def build_doj_url(file_id: str, dataset: str = None) -> str:
-    """Build a justice.gov URL for a given file ID."""
+def build_doj_url(file_id: str, dataset: str = None) -> str | None:
+    """Build a justice.gov URL for a given file ID, or None if dataset is unknown."""
     if dataset:
         ds_num = dataset.replace("doj_dataset_", "")
         return f"{DOJ_BASE}/files/DataSet%20{ds_num}/{file_id}.pdf"
-    return f"{DOJ_BASE}"
+    return None
 
 
 def _normalise_external_doc(doc: dict) -> dict:
@@ -286,7 +303,7 @@ def _normalise_external_doc(doc: dict) -> dict:
     file_id = doc.get("slug", doc.get("id", "unknown")).upper()
     excerpt = doc.get("excerpt", "")
 
-    relevance_score, relevance_cats = score_relevance(excerpt) if excerpt else (0, [])
+    relevance_score, relevance_cats = score_relevance(excerpt) if len(excerpt) >= 20 else (0, [])
 
     source_str = doc.get("source", "")
     doj_url = None

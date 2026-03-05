@@ -63,6 +63,7 @@ class Config:
         "DOJ_BASE_URL", "https://www.justice.gov/epstein"
     )
     JMAIL_BASE_URL = os.environ.get("JMAIL_BASE_URL", "https://jmail.world")
+    EXTERNAL_REQUEST_TIMEOUT = _int("EXTERNAL_REQUEST_TIMEOUT", 15)
 
     # ── Search & UI ───────────────────────────────────────────
     RESULTS_PER_PAGE = _int("RESULTS_PER_PAGE", 25)
