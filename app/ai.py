@@ -23,6 +23,26 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 _cached_model: str | None = None
+_cached_models_list: list[str] = []
+
+_QUERY_TIMEOUT = 120  # seconds; increase for 70B+ models
+
+_DEFAULT_CATEGORIES = [
+    "Trafficking",
+    "Sexual Abuse",
+    "Child Exploitation",
+    "Blackmail & Coercion",
+    "Intelligence Services",
+    "Financial Crime",
+    "Corruption & Cover-up",
+    "Legal Proceedings",
+    "Flight Logs",
+    "Communications",
+    "Photographs",
+    "Associates & Network",
+    "Properties",
+    "Victims",
+]
 
 
 def _ollama_url() -> str:
@@ -63,7 +83,7 @@ def _model_score(name: str) -> tuple[int, int]:
 
 def _get_model() -> str:
     """Get the configured model, or auto-detect the best available one."""
-    global _cached_model
+    global _cached_model, _cached_models_list
     if Config.OLLAMA_MODEL:
         return Config.OLLAMA_MODEL
     if _cached_model:
@@ -71,13 +91,13 @@ def _get_model() -> str:
     try:
         resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
         if resp.status_code == 200:
-            models = [m["name"] for m in resp.json().get("models", [])]
-            if models:
-                _cached_model = max(models, key=_model_score)
+            _cached_models_list = [m["name"] for m in resp.json().get("models", [])]
+            if _cached_models_list:
+                _cached_model = max(_cached_models_list, key=_model_score)
                 logger.info(f"Auto-selected model: {_cached_model}")
                 return _cached_model
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to fetch Ollama model list: {e}")
     return "llama3.1:8b"
 
 
@@ -191,23 +211,28 @@ documents. Do not suggest one-off topics. Return ONLY the JSON.\
 def check_ollama() -> dict:
     """Check if Ollama is running and which models are available."""
     model = _get_model()
-    try:
-        resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
-        if resp.status_code == 200:
-            models = [m["name"] for m in resp.json().get("models", [])]
-            return {
-                "status": "running",
-                "url": _ollama_url(),
-                "models": models,
-                "configured_model": model,
-                "model_available": any(
-                    model.split(":")[0] in m for m in models
-                ),
-            }
-    except requests.ConnectionError:
-        pass
-    except Exception as e:
-        logger.warning(f"Ollama check error: {e}")
+    # _get_model() populates _cached_models_list on success; reuse it if available,
+    # otherwise fall back to a fresh request so check_ollama() stays accurate even
+    # when called before any analysis has run.
+    models = _cached_models_list
+    if not models:
+        try:
+            resp = requests.get(f"{_ollama_url()}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                models = [m["name"] for m in resp.json().get("models", [])]
+        except requests.ConnectionError:
+            pass
+        except Exception as e:
+            logger.warning(f"Ollama check error: {e}")
+
+    if models:
+        return {
+            "status": "running",
+            "url": _ollama_url(),
+            "models": models,
+            "configured_model": model,
+            "model_available": any(model.split(":")[0] in m for m in models),
+        }
 
     return {
         "status": "not_running",
@@ -218,9 +243,10 @@ def check_ollama() -> dict:
     }
 
 
-def _query_ollama(prompt: str, system: str = SYSTEM_PROMPT, temperature: float = 0.1) -> str | None:
+def _query_ollama(prompt: str, system: str = SYSTEM_PROMPT, temperature: float = 0.1,
+                  model: str | None = None) -> str | None:
     """Send a prompt to Ollama via the chat API and return the response text."""
-    model = _get_model()
+    model = model or _get_model()
     try:
         resp = requests.post(
             f"{_ollama_url()}/api/chat",
@@ -237,7 +263,7 @@ def _query_ollama(prompt: str, system: str = SYSTEM_PROMPT, temperature: float =
                     "num_predict": 4096,
                 },
             },
-            timeout=120,
+            timeout=_QUERY_TIMEOUT,
         )
         if resp.status_code == 200:
             return resp.json().get("message", {}).get("content", "")
@@ -288,22 +314,26 @@ def analyse_document(text: str, file_id: str = "", source: str = "",
     if not text or len(text.strip()) < 20:
         return None
 
-    cats = known_categories or _default_categories()
-    ctx_chars = _doc_context_chars(_get_model())
+    model = _get_model()
+    cats = known_categories or _DEFAULT_CATEGORIES
+    ctx_chars = _doc_context_chars(model)
+    doc_text = text[:ctx_chars]
+    if len(text) > ctx_chars:
+        doc_text += f"\n[... document truncated at {ctx_chars} characters ...]"
     prompt = ANALYSIS_PROMPT.format(
         file_id=file_id,
         source=source,
         date=date or "unknown",
-        text=text[:ctx_chars],
+        text=doc_text,
         known_categories=", ".join(cats),
     )
 
-    raw = _query_ollama(prompt)
+    raw = _query_ollama(prompt, model=model)
     result = _parse_json_response(raw)
 
     if result is None:
         logger.debug(f"JSON parse failed for {file_id}, retrying...")
-        raw = _query_ollama(prompt, temperature=0.05)
+        raw = _query_ollama(prompt, temperature=0.05, model=model)
         result = _parse_json_response(raw)
 
     if result:
@@ -328,7 +358,7 @@ def discover_categories(summaries: list[dict],
     if not summaries:
         return []
 
-    cats = known_categories or _default_categories()
+    cats = known_categories or _DEFAULT_CATEGORIES
 
     summary_text = "\n".join(
         f"- [{s.get('file_id', '?')}] {s.get('summary', 'No summary')}"
@@ -353,20 +383,3 @@ def discover_categories(summaries: list[dict],
     return []
 
 
-def _default_categories() -> list[str]:
-    return [
-        "Trafficking",
-        "Sexual Abuse",
-        "Child Exploitation",
-        "Blackmail & Coercion",
-        "Intelligence Services",
-        "Financial Crime",
-        "Corruption & Cover-up",
-        "Legal Proceedings",
-        "Flight Logs",
-        "Communications",
-        "Photographs",
-        "Associates & Network",
-        "Properties",
-        "Victims",
-    ]
