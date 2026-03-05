@@ -13,8 +13,11 @@ Handles:
 
 import hashlib
 import itertools
+import logging
 import re
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 import dateparser
 import numpy as np
@@ -44,6 +47,59 @@ try:
 except ImportError:
     _get_nlp = None
 
+
+# ─── Module-level constants ──────────────────────────────────────────────────
+
+_PHONETIC_SUBS = [
+    ("ph", "f"), ("f", "ph"),
+    ("ey", "y"), ("y", "ey"), ("ie", "y"), ("y", "ie"),
+    ("ey", "ie"), ("ie", "ey"), ("ee", "ea"), ("ea", "ee"),
+    ("ei", "ie"), ("ie", "ei"),
+    ("c", "k"), ("k", "c"), ("ck", "k"), ("k", "ck"),
+    ("s", "z"), ("z", "s"),
+    ("sh", "sch"), ("sch", "sh"),
+    ("ff", "f"), ("f", "ff"),
+    ("ll", "l"), ("l", "ll"),
+    ("ss", "s"), ("s", "ss"),
+    ("tt", "t"), ("t", "tt"),
+    ("nn", "n"), ("n", "nn"),
+    ("oo", "o"), ("o", "oo"),
+]
+
+_CANONICAL_MAP = {
+    "Jeffrey Epstein": ["Jeff Epstein", "Jeffery Epstein", "J Epstein", "JE",
+                        "Johnathan Epstein", "Jeffry Epstein"],
+    "Ghislaine Maxwell": ["Gislaine Maxwell", "Ghislane Maxwell", "Ghislain Maxwell",
+                          "G Maxwell", "GM"],
+    "Lesley Groff": ["Lesly Groff", "Leslie Groff", "Lesly Goff", "Lesley Goff",
+                     "Lesely Groff"],
+    "Jean-Luc Brunel": ["Jean Luc Brunel", "JL Brunel", "Jean-Luc Brunell",
+                        "Jean Luck Brunel"],
+    "Sarah Kellen": ["Sara Kellen", "Sarah Kelen", "Sara Kelen", "Sarah Kellan"],
+    "Nadia Marcinkova": ["Nada Marcinkova", "Nadia Marcinko", "Nadia Marcinková",
+                         "Nadia Marcincova"],
+    "Virginia Giuffre": ["Virginia Roberts", "Virginia Roberts Giuffre",
+                         "Virginia Guiffre", "Virginia Giufre"],
+    "Les Wexner": ["Lex Wexner", "Leslie Wexner", "Les Wexnor", "L Wexner"],
+    "Alan Dershowitz": ["Allen Dershowitz", "Alan Dershawitz", "Alan Dershowiz",
+                        "A Dershowitz"],
+    "Prince Andrew": ["Andrew Windsor", "Duke of York", "Prince Andrew Duke of York"],
+    "Leon Black": ["Leon Blank", "L Black"],
+    "Glenn Dubin": ["Glen Dubin", "Glenn Duben", "G Dubin"],
+}
+
+_RELEVANCE_WEIGHTS = {
+    "child_exploitation": 1.0,
+    "sexual_abuse": 0.95,
+    "trafficking": 0.95,
+    "blackmail_coercion": 0.9,
+    "intelligence": 0.85,
+    "corruption": 0.85,
+    "financial_crime": 0.8,
+    "associates_network": 0.7,
+    "locations": 0.6,
+    "legal_proceedings": 0.5,
+}
 
 # ─── Query cleaning and generic fuzzy matching ──────────────────────────────
 
@@ -107,22 +163,7 @@ def generate_fuzzy_variants(word: str, max_variants: int = 10) -> list[str]:
         tier1.add(collapsed2)
 
     # Tier 2: phonetic substitutions
-    _subs = [
-        ("ph", "f"), ("f", "ph"),
-        ("ey", "y"), ("y", "ey"), ("ie", "y"), ("y", "ie"),
-        ("ey", "ie"), ("ie", "ey"), ("ee", "ea"), ("ea", "ee"),
-        ("ei", "ie"), ("ie", "ei"),
-        ("c", "k"), ("k", "c"), ("ck", "k"), ("k", "ck"),
-        ("s", "z"), ("z", "s"),
-        ("sh", "sch"), ("sch", "sh"),
-        ("ff", "f"), ("f", "ff"),
-        ("ll", "l"), ("l", "ll"),
-        ("ss", "s"), ("s", "ss"),
-        ("tt", "t"), ("t", "tt"),
-        ("nn", "n"), ("n", "nn"),
-        ("oo", "o"), ("o", "oo"),
-    ]
-    for old, new in _subs:
+    for old, new in _PHONETIC_SUBS:
         idx = word_lower.find(old)
         if idx != -1:
             tier2.add(word_lower[:idx] + new + word_lower[idx + len(old):])
@@ -301,6 +342,11 @@ KNOWN_NAMES = [
     "Johnathan Epstein", "Jonathan Farkas",
 ]
 
+_KNOWN_NAMES_RE = re.compile(
+    "|".join(re.escape(n) for n in KNOWN_NAMES),
+    re.IGNORECASE,
+)
+
 
 def compute_content_hash(text: str) -> str:
     normalised = re.sub(r"\s+", " ", text.lower().strip())
@@ -327,47 +373,26 @@ def extract_entities(text: str) -> list[dict]:
                         "entity_type": ent.label_,
                     })
 
-    for name in KNOWN_NAMES:
-        if name.lower() in text.lower():
-            canonical = resolve_name(name)
-            key = (canonical.lower(), "PERSON")
-            if key not in seen:
-                seen.add(key)
-                entities.append({
-                    "name": name,
-                    "canonical_name": canonical,
-                    "entity_type": "PERSON",
-                })
+    for m in _KNOWN_NAMES_RE.finditer(text):
+        name = m.group(0)
+        canonical = resolve_name(name)
+        key = (canonical.lower(), "PERSON")
+        if key not in seen:
+            seen.add(key)
+            entities.append({
+                "name": name,
+                "canonical_name": canonical,
+                "entity_type": "PERSON",
+            })
 
     return entities
 
 
 def resolve_name(name: str, threshold: int = 80) -> str:
     """Resolve a possibly misspelled name to its canonical form."""
-    canonical_map = {
-        "Jeffrey Epstein": ["Jeff Epstein", "Jeffery Epstein", "J Epstein", "JE",
-                            "Johnathan Epstein", "Jeffry Epstein"],
-        "Ghislaine Maxwell": ["Gislaine Maxwell", "Ghislane Maxwell", "Ghislain Maxwell",
-                              "G Maxwell", "GM"],
-        "Lesley Groff": ["Lesly Groff", "Leslie Groff", "Lesly Goff", "Lesley Goff",
-                         "Lesely Groff"],
-        "Jean-Luc Brunel": ["Jean Luc Brunel", "JL Brunel", "Jean-Luc Brunell",
-                            "Jean Luck Brunel"],
-        "Sarah Kellen": ["Sara Kellen", "Sarah Kelen", "Sara Kelen", "Sarah Kellan"],
-        "Nadia Marcinkova": ["Nada Marcinkova", "Nadia Marcinko", "Nadia Marcinková",
-                             "Nadia Marcincova"],
-        "Virginia Giuffre": ["Virginia Roberts", "Virginia Roberts Giuffre",
-                             "Virginia Guiffre", "Virginia Giufre"],
-        "Les Wexner": ["Lex Wexner", "Leslie Wexner", "Les Wexnor", "L Wexner"],
-        "Alan Dershowitz": ["Allen Dershowitz", "Alan Dershawitz", "Alan Dershowiz",
-                            "A Dershowitz"],
-        "Prince Andrew": ["Andrew Windsor", "Duke of York", "Prince Andrew Duke of York"],
-        "Leon Black": ["Leon Blank", "L Black"],
-        "Glenn Dubin": ["Glen Dubin", "Glenn Duben", "G Dubin"],
-    }
     name_clean = name.strip()
 
-    for canonical, variants in canonical_map.items():
+    for canonical, variants in _CANONICAL_MAP.items():
         if name_clean.lower() == canonical.lower():
             return canonical
         for variant in variants:
@@ -403,24 +428,11 @@ def score_relevance(text: str) -> tuple[float, list[str]]:
     matched_categories = []
     total_score = 0.0
 
-    weights = {
-        "child_exploitation": 1.0,
-        "sexual_abuse": 0.95,
-        "trafficking": 0.95,
-        "blackmail_coercion": 0.9,
-        "intelligence": 0.85,
-        "corruption": 0.85,
-        "financial_crime": 0.8,
-        "associates_network": 0.7,
-        "locations": 0.6,
-        "legal_proceedings": 0.5,
-    }
-
     for category, keywords in RELEVANCE_KEYWORDS.items():
         hits = sum(1 for kw in keywords if kw.lower() in text_lower)
         if hits > 0:
             density = hits / len(keywords)
-            weight = weights.get(category, 0.5)
+            weight = _RELEVANCE_WEIGHTS.get(category, 0.5)
             cat_score = min(density * weight * 2, weight)
             total_score += cat_score
             matched_categories.append(category)
@@ -487,7 +499,8 @@ def parse_date(text: str) -> datetime | None:
                 "PREFER_DATES_FROM": "past",
             },
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(f"parse_date failed for {text!r}: {e}")
         return None
 
 
@@ -496,7 +509,7 @@ def extract_dates(text: str) -> list[datetime]:
     for match in _date_re.finditer(text):
         date_str = next(g for g in match.groups() if g)
         dt = parse_date(date_str)
-        if dt and 1990 <= dt.year <= 2025:
+        if dt and 1990 <= dt.year <= datetime.now().year:
             dates.append(dt)
     return sorted(set(dates))
 
