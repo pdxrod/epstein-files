@@ -14,7 +14,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 import requests
@@ -70,11 +70,14 @@ SYSTEM_CATEGORIES = [
 
 
 def ensure_system_categories():
+    existing_slugs = {
+        c.slug for c in Category.query.filter(
+            Category.slug.in_([s for s, _, _ in SYSTEM_CATEGORIES])
+        ).all()
+    }
     for slug, name, desc in SYSTEM_CATEGORIES:
-        existing = Category.query.filter_by(slug=slug).first()
-        if not existing:
-            cat = Category(slug=slug, name=name, description=desc, is_system=True)
-            db.session.add(cat)
+        if slug not in existing_slugs:
+            db.session.add(Category(slug=slug, name=name, description=desc, is_system=True))
     db.session.commit()
 
 
@@ -236,8 +239,8 @@ class JmailScraper:
             resp = self.session.get(url, params={"q": query}, timeout=30)
             if resp.status_code == 200:
                 return resp.json().get("results", [])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"jmail.world search failed for {query!r}: {e}")
         return []
 
 
@@ -340,11 +343,16 @@ class DocumentProcessor:
             if ent_data.get("canonical_name") and ent_data["canonical_name"] != ent_data["name"]:
                 _ensure_name_variant(ent_data["name"], ent_data["canonical_name"])
 
-        for cat_slug in relevance_cats:
-            cat = Category.query.filter_by(slug=cat_slug.replace("_", "-")).first()
-            if cat and cat not in doc.categories:
-                doc.categories.append(cat)
-                cat.document_count = (cat.document_count or 0) + 1
+        if relevance_cats:
+            cat_slugs = [s.replace("_", "-") for s in relevance_cats]
+            cat_map = {
+                c.slug: c for c in Category.query.filter(Category.slug.in_(cat_slugs)).all()
+            }
+            for cat_slug in cat_slugs:
+                cat = cat_map.get(cat_slug)
+                if cat and cat not in doc.categories:
+                    doc.categories.append(cat)
+                    cat.document_count = (cat.document_count or 0) + 1
 
         self._hash_cache[content_hash] = doc.id
 
@@ -400,7 +408,8 @@ class DocumentProcessor:
                         )
                     )
                     db.session.commit()
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to link embedded email {existing_id} to {parent_doc.file_id}: {e}")
                     db.session.rollback()
                 continue
 
@@ -478,7 +487,7 @@ class ThreadBuilder:
         """Group emails by subject and participants into threads."""
         emails = (
             Document.query.filter_by(doc_type="email", is_duplicate=False)
-            .filter(Document.subject.isnot(None))
+            .filter(Document.subject.isnot(None), Document.thread_id.is_(None))
             .order_by(Document.date.asc())
             .all()
         )
@@ -581,7 +590,7 @@ def ingest_from_doj():
     processor.load_hash_cache()
     ensure_system_categories()
 
-    job = IngestJob(source="doj", url=DOJScraper.DISCLOSURES_URL, started_at=datetime.utcnow())
+    job = IngestJob(source="doj", url=DOJScraper.DISCLOSURES_URL, started_at=datetime.now(timezone.utc))
     db.session.add(job)
     db.session.commit()
 
@@ -617,7 +626,7 @@ def ingest_from_doj():
         thread_builder.build_threads()
 
         job.status = "completed"
-        job.completed_at = datetime.utcnow()
+        job.completed_at = datetime.now(timezone.utc)
 
     except Exception as e:
         job.status = "failed"
