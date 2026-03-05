@@ -1,6 +1,7 @@
-import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 from app import db
+
+_BODY_PREVIEW_LEN = 500
 
 document_entities = db.Table(
     "document_entities",
@@ -59,7 +60,7 @@ class Document(db.Model):
     ai_summary = db.Column(db.Text)
     ai_connections = db.Column(db.Text)
 
-    created_at = db.Column(db.DateTime, default=lambda: datetime.datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     processed = db.Column(db.Boolean, default=False, index=True)
 
     entities = db.relationship("Entity", secondary=document_entities, back_populates="documents")
@@ -67,12 +68,12 @@ class Document(db.Model):
     thread = db.relationship("Thread", back_populates="documents")
     duplicate_of = db.relationship("Document", remote_side=[id], foreign_keys=[duplicate_of_id])
 
-    def to_dict(self):
-        return {
+    def to_dict(self, include_related: bool = True):
+        d = {
             "id": self.id,
             "file_id": self.file_id,
             "title": self.title,
-            "body": self.body[:500] if self.body else None,
+            "body": self.body[:_BODY_PREVIEW_LEN] if self.body else None,
             "doc_type": self.doc_type,
             "source": self.source,
             "source_url": self.source_url,
@@ -88,13 +89,14 @@ class Document(db.Model):
             "relevance_categories": self.relevance_categories,
             "volume": self.volume,
             "folder": self.folder,
-            "entities": [e.to_dict() for e in self.entities],
-            "categories": [c.to_dict() for c in self.categories],
             "thread_id": self.thread_id,
             "is_duplicate": self.is_duplicate,
             "ai_summary": self.ai_summary,
             "ai_connections": self.ai_connections,
+            "entities": [e.to_dict() for e in self.entities] if include_related else [],
+            "categories": [c.to_dict() for c in self.categories] if include_related else [],
         }
+        return d
 
 
 class Entity(db.Model):
@@ -140,6 +142,7 @@ class Category(db.Model):
             "name": self.name,
             "slug": self.slug,
             "description": self.description,
+            "is_system": self.is_system,
             "document_count": self.document_count,
         }
 
@@ -178,6 +181,14 @@ class NameVariant(db.Model):
 
     __table_args__ = (db.UniqueConstraint("variant", "canonical"),)
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "variant": self.variant,
+            "canonical": self.canonical,
+            "similarity_score": self.similarity_score,
+        }
+
 
 class EntityRelationship(db.Model):
     """Tracks connections between entities (from epsteininvestigation.org graph)."""
@@ -190,8 +201,8 @@ class EntityRelationship(db.Model):
     strength = db.Column(db.Float, default=0.0)
     source = db.Column(db.String(100))
 
-    entity_a = db.relationship("Entity", foreign_keys=[entity_a_id])
-    entity_b = db.relationship("Entity", foreign_keys=[entity_b_id])
+    entity_a = db.relationship("Entity", foreign_keys=[entity_a_id], lazy="joined")
+    entity_b = db.relationship("Entity", foreign_keys=[entity_b_id], lazy="joined")
 
     __table_args__ = (db.UniqueConstraint("entity_a_id", "entity_b_id", "relationship_type"),)
 
