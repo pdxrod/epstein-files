@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 
 import requests
@@ -50,14 +51,40 @@ ARCHIVE_CSV_URLS = {
     "emails": f"{_ARCHIVE_BASE}/api/download/emails",
 }
 
+_HF_URLS = [
+    "https://huggingface.co/datasets/tensonaut/EPSTEIN_FILES_20K/resolve/main/EPS_FILES_20K_NOV2025.csv?download=true",
+    "https://huggingface.co/datasets/tensonaut/EPSTEIN_FILES_20K/resolve/main/EPS_FILES_20K_NOV2025.csv",
+]
+
+_ENRICH_SEARCH_TERMS = [
+    "trafficking", "victim", "deposition", "maxwell", "FBI",
+    "email", "financial", "abuse", "travel", "phone", "police",
+    "testimony", "massage", "flight", "photograph",
+]
+
+
+def _fetch_csv(url: str, retries: int = 2, timeout: int = 30) -> requests.Response:
+    """GET a CSV URL, retrying once on transient failure before raising."""
+    last_exc: Exception = RuntimeError(f"No attempts made for {url}")
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt < retries - 1:
+                logger.warning(f"CSV fetch attempt {attempt + 1} failed for {url}: {e}, retrying…")
+                time.sleep(2)
+    raise last_exc
+
 
 def import_archive_entities(db):
     """Import entity data from epsteininvestigation.org CSV."""
     from app.models import Entity
 
     logger.info("Downloading entities CSV...")
-    resp = requests.get(ARCHIVE_CSV_URLS["entities"], timeout=30)
-    resp.raise_for_status()
+    resp = _fetch_csv(ARCHIVE_CSV_URLS["entities"])
 
     # Pre-load all existing entities to avoid N+1 queries
     existing = {(e.name, e.entity_type): e for e in Entity.query.all()}
@@ -100,8 +127,7 @@ def import_archive_relationships(db):
     from app.models import Entity, EntityRelationship
 
     logger.info("Downloading relationships CSV...")
-    resp = requests.get(ARCHIVE_CSV_URLS["relationships"], timeout=30)
-    resp.raise_for_status()
+    resp = _fetch_csv(ARCHIVE_CSV_URLS["relationships"])
 
     # Pre-load caches to avoid N+1 queries
     entity_cache = {e.name: e for e in Entity.query.all()}
@@ -114,9 +140,20 @@ def import_archive_relationships(db):
         ).all()
     }
 
-    reader = csv.DictReader(io.StringIO(resp.text))
+    rows = list(csv.DictReader(io.StringIO(resp.text)))
+
+    # Pre-stage all referenced entities so a single flush assigns all IDs at once
+    for row in rows:
+        name_a = row.get("entity_a", "").strip()
+        name_b = row.get("entity_b", "").strip()
+        if name_a:
+            _get_or_create_entity(db, name_a, cache=entity_cache)
+        if name_b:
+            _get_or_create_entity(db, name_b, cache=entity_cache)
+    db.session.flush()  # one flush to assign IDs to all new entities
+
     count = 0
-    for row in reader:
+    for row in rows:
         name_a = row.get("entity_a", "").strip()
         name_b = row.get("entity_b", "").strip()
         if not name_a or not name_b:
@@ -124,10 +161,6 @@ def import_archive_relationships(db):
 
         entity_a = _get_or_create_entity(db, name_a, cache=entity_cache)
         entity_b = _get_or_create_entity(db, name_b, cache=entity_cache)
-
-        # Flush only when new entities need IDs assigned
-        if entity_a.id is None or entity_b.id is None:
-            db.session.flush()
 
         rel_type = row.get("relationship_type", "associated").strip()
         strength = float(row.get("strength", 0) or 0)
@@ -155,8 +188,7 @@ def import_archive_flights(db):
     from app.models import FlightRecord
 
     logger.info("Downloading flights CSV...")
-    resp = requests.get(ARCHIVE_CSV_URLS["flights"], timeout=30)
-    resp.raise_for_status()
+    resp = _fetch_csv(ARCHIVE_CSV_URLS["flights"])
 
     # Pre-load existing flight keys to avoid duplicates
     existing_keys = {
@@ -219,13 +251,8 @@ def import_huggingface_dataset(db, batch_size=100, max_docs=None):
       2. Parquet via HF datasets library
       3. Bulk fetch from epsteininvestigation.org API as last resort
     """
-    HF_URLS = [
-        "https://huggingface.co/datasets/tensonaut/EPSTEIN_FILES_20K/resolve/main/EPS_FILES_20K_NOV2025.csv?download=true",
-        "https://huggingface.co/datasets/tensonaut/EPSTEIN_FILES_20K/resolve/main/EPS_FILES_20K_NOV2025.csv",
-    ]
-
     # Method 1: Streaming CSV download
-    for url in HF_URLS:
+    for url in _HF_URLS:
         logger.info(f"Trying streaming download: {url[:80]}...")
         try:
             resp = requests.get(
@@ -308,7 +335,9 @@ def _ingest_csv_rows(db, rows, batch_size=100, max_docs=None):
             logger.info(f"  ...imported {count} documents ({skipped} skipped)")
 
     db.session.commit()
-    _update_fts_batch(db, count % batch_size or batch_size)
+    remaining = count % batch_size
+    if remaining:
+        _update_fts_batch(db, remaining)
     logger.info(f"Imported {count} documents from CSV ({skipped} skipped)")
     return count
 
@@ -451,13 +480,8 @@ def _import_via_api_bulk(db, batch_size=100, max_docs=None):
 
     # Phase B: Enrich with search excerpts for key terms
     logger.info("Bulk import phase B: enriching with search text...")
-    search_terms = [
-        "trafficking", "victim", "deposition", "maxwell", "FBI",
-        "email", "financial", "abuse", "travel", "phone", "police",
-        "testimony", "massage", "flight", "photograph",
-    ]
     enriched = 0
-    for term in search_terms:
+    for term in _ENRICH_SEARCH_TERMS:
         if count >= max_docs:
             break
         enriched += _enrich_from_search(db, API_BASE, term, max_pages=5)
@@ -551,19 +575,14 @@ def import_all_archive_csvs(db):
     return results
 
 
-def _get_or_create_entity(db, name, etype="PERSON", cache=None):
+def _get_or_create_entity(db, name, etype="PERSON", cache: dict | None = None):
     from app.models import Entity
-    if cache is not None:
-        if name in cache:
-            return cache[name]
-        entity = Entity(name=name, canonical_name=name, entity_type=etype, mention_count=0)
-        db.session.add(entity)
-        cache[name] = entity
-        return entity
-    entity = Entity.query.filter_by(name=name).first()
-    if not entity:
-        entity = Entity(name=name, canonical_name=name, entity_type=etype, mention_count=0)
-        db.session.add(entity)
+    assert cache is not None, "_get_or_create_entity requires a cache dict"
+    if name in cache:
+        return cache[name]
+    entity = Entity(name=name, canonical_name=name, entity_type=etype, mention_count=0)
+    db.session.add(entity)
+    cache[name] = entity
     return entity
 
 
