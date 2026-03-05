@@ -107,23 +107,17 @@ def clean_query(query: str) -> str:
     """
     Clean a search query:
     - Strip leading/trailing whitespace
-    - Strip wrapping quotes (single or double)
+    - Strip wrapping quotes (single or double, straight or curly)
     - Strip leading/trailing punctuation
     - Collapse internal whitespace
     """
     q = query.strip()
-    # Strip matching outer quotes
-    if len(q) >= 2 and q[0] == q[-1] and q[0] in ('"', "'", "\u201c", "\u201d", "\u2018", "\u2019"):
-        q = q[1:-1].strip()
-    # Also handle mismatched curly quotes
-    if q.startswith(("\u201c", "\u201d", '"')) and q.endswith(("\u201c", "\u201d", '"')):
-        q = q[1:-1].strip()
-    if q.startswith(("\u2018", "\u2019", "'")) and q.endswith(("\u2018", "\u2019", "'")):
-        q = q[1:-1].strip()
-    # Strip leading/trailing punctuation (but keep internal)
+    if len(q) >= 2:
+        expected_close = _QUOTE_PAIRS.get(q[0])
+        if expected_close and q[-1] == expected_close:
+            q = q[1:-1].strip()
     q = re.sub(r"^[^\w]+", "", q)
     q = re.sub(r"[^\w]+$", "", q)
-    # Collapse whitespace
     q = re.sub(r"\s+", " ", q).strip()
     return q
 
@@ -169,12 +163,13 @@ def generate_fuzzy_variants(word: str, max_variants: int = 10) -> list[str]:
             tier2.add(word_lower[:idx] + new + word_lower[idx + len(old):])
 
     # Tier 3: adjacent transpositions (fixes swapped-letter typos)
+    chars = list(word_lower)
     for i in range(len(word_lower) - 1):
-        chars = list(word_lower)
         chars[i], chars[i + 1] = chars[i + 1], chars[i]
         t = "".join(chars)
         if t != word_lower:
             tier3.add(t)
+        chars[i], chars[i + 1] = chars[i + 1], chars[i]  # restore
 
     # Tier 4: single-character deletions
     for i in range(len(word_lower)):
@@ -347,6 +342,23 @@ _KNOWN_NAMES_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Maps an opening quote character to its expected closing character.
+_QUOTE_PAIRS = {
+    '"':      '"',
+    "'":      "'",
+    "\u201c": "\u201d",  # "left double" → "right double"
+    "\u2018": "\u2019",  # 'left single' → 'right single'
+}
+
+# Precomputed per-category keyword sets (all lowercase) and counts for
+# score_relevance() — avoids per-call .lower() and len() overhead.
+_RELEVANCE_KEYWORD_SETS: dict[str, frozenset] = {
+    cat: frozenset(kws) for cat, kws in RELEVANCE_KEYWORDS.items()
+}
+_RELEVANCE_KEYWORD_COUNTS: dict[str, int] = {
+    cat: len(kws) for cat, kws in RELEVANCE_KEYWORDS.items()
+}
+
 
 def compute_content_hash(text: str) -> str:
     normalised = re.sub(r"\s+", " ", text.lower().strip())
@@ -402,7 +414,7 @@ def resolve_name(name: str, threshold: int = 80) -> str:
             if score >= threshold:
                 return canonical
 
-    all_canonical = list(canonical_map.keys())
+    all_canonical = list(_CANONICAL_MAP.keys())
     match = process.extractOne(name_clean, all_canonical, scorer=fuzz.WRatio)
     if match and match[1] >= threshold:
         return match[0]
@@ -428,10 +440,10 @@ def score_relevance(text: str) -> tuple[float, list[str]]:
     matched_categories = []
     total_score = 0.0
 
-    for category, keywords in RELEVANCE_KEYWORDS.items():
-        hits = sum(1 for kw in keywords if kw.lower() in text_lower)
+    for category, kw_set in _RELEVANCE_KEYWORD_SETS.items():
+        hits = sum(1 for kw in kw_set if kw in text_lower)
         if hits > 0:
-            density = hits / len(keywords)
+            density = hits / _RELEVANCE_KEYWORD_COUNTS[category]
             weight = _RELEVANCE_WEIGHTS.get(category, 0.5)
             cat_score = min(density * weight * 2, weight)
             total_score += cat_score
@@ -454,28 +466,31 @@ def parse_email(text: str) -> dict:
         "quoted_emails": [],
     }
 
-    from_match = re.search(r"(?:From|De)\s*:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
-    if from_match:
-        sender_raw = from_match.group(1).strip()
-        email_match = re.search(r"[\w.+-]+@[\w.-]+", sender_raw)
-        if email_match:
-            result["sender_email"] = email_match.group(0)
-            result["sender"] = re.sub(r"<.*?>", "", sender_raw).strip() or email_match.group(0)
-        else:
-            result["sender"] = sender_raw
-
-    to_match = re.search(r"(?:To|À)\s*:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
-    if to_match:
-        result["recipients"] = to_match.group(1).strip()
-
-    subj_match = re.search(r"Subject\s*:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
-    if subj_match:
-        result["subject"] = subj_match.group(1).strip()
-
-    date_match = re.search(r"(?:Date|Sent)\s*:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
-    if date_match:
-        result["date_str"] = date_match.group(1).strip()
-        result["date"] = parse_date(result["date_str"])
+    # Single pass over all headers using the precompiled regex.
+    # Groups: 1=From/De, 2=To/À, 3=Date/Sent, 4=Subject
+    found: set[int] = set()
+    for m in EMAIL_HEADER_RE.finditer(text):
+        if m.group(1) and 1 not in found:
+            found.add(1)
+            sender_raw = m.group(1).strip()
+            email_match = re.search(r"[\w.+-]+@[\w.-]+", sender_raw)
+            if email_match:
+                result["sender_email"] = email_match.group(0)
+                result["sender"] = re.sub(r"<.*?>", "", sender_raw).strip() or email_match.group(0)
+            else:
+                result["sender"] = sender_raw
+        elif m.group(2) and 2 not in found:
+            found.add(2)
+            result["recipients"] = m.group(2).strip()
+        elif m.group(3) and 3 not in found:
+            found.add(3)
+            result["date_str"] = m.group(3).strip()
+            result["date"] = parse_date(result["date_str"])
+        elif m.group(4) and 4 not in found:
+            found.add(4)
+            result["subject"] = m.group(4).strip()
+        if len(found) == 4:
+            break
 
     parts = QUOTED_EMAIL_RE.split(text)
     if len(parts) > 1:
@@ -601,6 +616,13 @@ class FuzzySearcher:
 class TopicDiscoverer:
     """Discovers document topics beyond the predefined categories."""
 
+    _SKIP_WORDS = frozenset({
+        "said", "would", "also", "one", "two", "new", "like",
+        "time", "just", "know", "year", "page", "file", "document",
+        "email", "sent", "received", "com", "gmail", "yahoo",
+        "http", "https", "www",
+    })
+
     def __init__(self):
         self._vectorizer = TfidfVectorizer(
             max_features=10000,
@@ -621,17 +643,10 @@ class TopicDiscoverer:
         mean_tfidf = np.asarray(tfidf_matrix.mean(axis=0)).flatten()
         top_indices = np.argsort(mean_tfidf)[-n_topics * 3:][::-1]
 
-        skip_words = {
-            "said", "would", "also", "one", "two", "new", "like",
-            "time", "just", "know", "year", "page", "file", "document",
-            "email", "sent", "received", "com", "gmail", "yahoo",
-            "http", "https", "www",
-        }
-
         topics = []
         for idx in top_indices:
             phrase = feature_names[idx]
-            if phrase.lower() not in skip_words and len(phrase) > 2:
+            if phrase.lower() not in self._SKIP_WORDS and len(phrase) > 2:
                 topics.append({
                     "phrase": phrase,
                     "score": float(mean_tfidf[idx]),
