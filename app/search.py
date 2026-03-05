@@ -10,11 +10,14 @@ Provides:
 - "Interesting documents" random sampling weighted by relevance
 """
 
+import logging
 import re
 from datetime import datetime, timedelta
 
 from rapidfuzz import fuzz, process
-from sqlalchemy import func, or_, and_, desc, text as sql_text
+from sqlalchemy import func, or_, desc, text as sql_text
+
+logger = logging.getLogger(__name__)
 
 from app import db
 from app.models import (
@@ -22,7 +25,7 @@ from app.models import (
     EntityRelationship, FlightRecord,
     document_entities, document_categories,
 )
-from app.nlp import resolve_name, clean_query, FuzzySearcher, KNOWN_NAMES, parse_date
+from app.nlp import resolve_name, clean_query, KNOWN_NAMES, parse_date
 
 _FTS5_SPECIAL = re.compile(r'[\"*()\-+:^]')
 
@@ -60,7 +63,8 @@ def search_fulltext(query: str, page: int = 1, per_page: int = 25, filters: dict
             {"query": fts_query},
         ).scalar()
 
-    except Exception:
+    except Exception as e:
+        logger.warning(f"FTS query failed for {fts_query!r}: {e}")
         fts_results = []
         count_result = 0
 
@@ -145,7 +149,8 @@ def search_by_name(name: str, page: int = 1, per_page: int = 25):
                 {"query": fts_names},
             ).fetchall()
             doc_ids = [r[0] for r in doc_ids]
-        except Exception:
+        except Exception as e:
+            logger.warning(f"FTS name search failed for {fts_names!r}: {e}")
             doc_ids = []
 
         if doc_ids:
@@ -372,18 +377,30 @@ def get_date_histogram():
 
 def get_stats():
     """Get overall database statistics."""
+    # Six document-table counts in one pass using CASE expressions
+    doc_stats = db.session.execute(sql_text(
+        "SELECT"
+        "  SUM(CASE WHEN is_duplicate=0 THEN 1 ELSE 0 END),"
+        "  SUM(CASE WHEN is_duplicate=0 AND doc_type='email' THEN 1 ELSE 0 END),"
+        "  SUM(CASE WHEN is_duplicate=1 THEN 1 ELSE 0 END),"
+        "  SUM(CASE WHEN is_duplicate=0 AND relevance_score > 0.3 THEN 1 ELSE 0 END),"
+        "  SUM(CASE WHEN processed=1 THEN 1 ELSE 0 END),"
+        "  SUM(CASE WHEN processed=0 THEN 1 ELSE 0 END)"
+        " FROM documents"
+    )).fetchone()
+    total_docs, total_emails, total_dupes, high_rel, ai_done, unproc = (
+        int(v or 0) for v in doc_stats
+    )
     return {
-        "total_documents": Document.query.filter_by(is_duplicate=False).count(),
-        "total_emails": Document.query.filter_by(doc_type="email", is_duplicate=False).count(),
+        "total_documents": total_docs,
+        "total_emails": total_emails,
         "total_entities": Entity.query.count(),
         "total_categories": Category.query.count(),
         "total_threads": Thread.query.count(),
-        "total_duplicates": Document.query.filter_by(is_duplicate=True).count(),
-        "high_relevance": Document.query.filter(
-            Document.relevance_score > 0.3, Document.is_duplicate == False
-        ).count(),
-        "ai_analysed": Document.query.filter_by(processed=True).count(),
-        "unprocessed": Document.query.filter_by(processed=False).count(),
+        "total_duplicates": total_dupes,
+        "high_relevance": high_rel,
+        "ai_analysed": ai_done,
+        "unprocessed": unproc,
         "relationships": EntityRelationship.query.count(),
         "flights": FlightRecord.query.count(),
     }
@@ -411,8 +428,7 @@ def _build_fts_query(query: str) -> str:
         w = words[0]
         return f"{w}*" if len(w) > 2 else w
 
-    safe_words = [w for w in words if w]
-    return "NEAR(" + " ".join(safe_words) + ", 5)"
+    return "NEAR(" + " ".join(words) + ", 5)"
 
 
 def _fuzzy_search_fallback(query: str, page: int, per_page: int, filters: dict):
@@ -421,29 +437,24 @@ def _fuzzy_search_fallback(query: str, page: int, per_page: int, filters: dict):
     if canonical != query:
         return search_by_name(canonical, page, per_page)
 
-    search_filter = or_(
-        Document.body.ilike(f"%{query}%"),
-        Document.title.ilike(f"%{query}%"),
-        Document.sender.ilike(f"%{query}%"),
-        Document.recipients.ilike(f"%{query}%"),
-        Document.subject.ilike(f"%{query}%"),
+    base = Document.query.filter(
+        Document.is_duplicate == False,
+        or_(
+            Document.body.ilike(f"%{query}%"),
+            Document.title.ilike(f"%{query}%"),
+            Document.sender.ilike(f"%{query}%"),
+            Document.recipients.ilike(f"%{query}%"),
+            Document.subject.ilike(f"%{query}%"),
+        ),
     )
 
+    total = base.count()
     docs = (
-        Document.query.filter(
-            Document.is_duplicate == False,
-            search_filter,
-        )
-        .order_by(desc(Document.relevance_score))
+        base.order_by(desc(Document.relevance_score))
         .offset((page - 1) * per_page)
         .limit(per_page)
         .all()
     )
-
-    total = Document.query.filter(
-        Document.is_duplicate == False,
-        search_filter,
-    ).count()
 
     return {
         "items": [d.to_dict() for d in docs],
