@@ -39,6 +39,9 @@ def import_archive_entities(db):
     resp = requests.get(ARCHIVE_CSV_URLS["entities"], timeout=30)
     resp.raise_for_status()
 
+    # Pre-load all existing entities to avoid N+1 queries
+    existing = {(e.name, e.entity_type): e for e in Entity.query.all()}
+
     reader = csv.DictReader(io.StringIO(resp.text))
     count = 0
     for row in reader:
@@ -47,14 +50,14 @@ def import_archive_entities(db):
             continue
 
         etype = _normalise_entity_type(row.get("entity_type", "PERSON"))
-        existing = Entity.query.filter_by(name=name, entity_type=etype).first()
-        if existing:
-            existing.mention_count = max(
-                existing.mention_count or 0,
+        entity = existing.get((name, etype))
+        if entity:
+            entity.mention_count = max(
+                entity.mention_count or 0,
                 int(row.get("document_count", 0) or 0),
             )
             if row.get("role_description"):
-                existing.description = row["role_description"]
+                entity.description = row["role_description"]
         else:
             entity = Entity(
                 name=name,
@@ -64,6 +67,7 @@ def import_archive_entities(db):
                 mention_count=int(row.get("document_count", 0) or 0),
             )
             db.session.add(entity)
+            existing[(name, etype)] = entity
         count += 1
 
     db.session.commit()
@@ -79,6 +83,17 @@ def import_archive_relationships(db):
     resp = requests.get(ARCHIVE_CSV_URLS["relationships"], timeout=30)
     resp.raise_for_status()
 
+    # Pre-load caches to avoid N+1 queries
+    entity_cache = {e.name: e for e in Entity.query.all()}
+    existing_rels = {
+        (r.entity_a_id, r.entity_b_id, r.relationship_type)
+        for r in db.session.query(
+            EntityRelationship.entity_a_id,
+            EntityRelationship.entity_b_id,
+            EntityRelationship.relationship_type,
+        ).all()
+    }
+
     reader = csv.DictReader(io.StringIO(resp.text))
     count = 0
     for row in reader:
@@ -87,20 +102,18 @@ def import_archive_relationships(db):
         if not name_a or not name_b:
             continue
 
-        entity_a = _get_or_create_entity(db, name_a)
-        entity_b = _get_or_create_entity(db, name_b)
-        db.session.flush()
+        entity_a = _get_or_create_entity(db, name_a, cache=entity_cache)
+        entity_b = _get_or_create_entity(db, name_b, cache=entity_cache)
+
+        # Flush only when new entities need IDs assigned
+        if entity_a.id is None or entity_b.id is None:
+            db.session.flush()
 
         rel_type = row.get("relationship_type", "associated").strip()
         strength = float(row.get("strength", 0) or 0)
 
-        existing = EntityRelationship.query.filter_by(
-            entity_a_id=entity_a.id,
-            entity_b_id=entity_b.id,
-            relationship_type=rel_type,
-        ).first()
-
-        if not existing:
+        key = (entity_a.id, entity_b.id, rel_type)
+        if key not in existing_rels:
             rel = EntityRelationship(
                 entity_a_id=entity_a.id,
                 entity_b_id=entity_b.id,
@@ -109,6 +122,7 @@ def import_archive_relationships(db):
                 source="epsteininvestigation.org",
             )
             db.session.add(rel)
+            existing_rels.add(key)
             count += 1
 
     db.session.commit()
@@ -124,10 +138,29 @@ def import_archive_flights(db):
     resp = requests.get(ARCHIVE_CSV_URLS["flights"], timeout=30)
     resp.raise_for_status()
 
+    # Pre-load existing flight keys to avoid duplicates
+    existing_keys = {
+        (date_str, tail, dep, arr)
+        for date_str, tail, dep, arr in db.session.query(
+            FlightRecord.flight_date_str,
+            FlightRecord.aircraft_tail,
+            FlightRecord.departure_code,
+            FlightRecord.arrival_code,
+        ).all()
+    }
+
     reader = csv.DictReader(io.StringIO(resp.text))
     count = 0
     for row in reader:
         date_str = row.get("flight_date", "").strip()
+        tail = row.get("aircraft_tail_number", "")
+        dep = row.get("departure_airport_code", "")
+        arr = row.get("arrival_airport_code", "")
+
+        key = (date_str, tail, dep, arr)
+        if key in existing_keys:
+            continue
+
         flight_date = None
         if date_str:
             try:
@@ -138,16 +171,17 @@ def import_archive_flights(db):
         record = FlightRecord(
             flight_date=flight_date,
             flight_date_str=date_str,
-            aircraft_tail=row.get("aircraft_tail_number", ""),
+            aircraft_tail=tail,
             pilot=row.get("pilot_name", ""),
-            departure_code=row.get("departure_airport_code", ""),
+            departure_code=dep,
             departure_airport=row.get("departure_airport", ""),
-            arrival_code=row.get("arrival_airport_code", ""),
+            arrival_code=arr,
             arrival_airport=row.get("arrival_airport", ""),
             passengers=row.get("passenger_names", ""),
             source="epsteininvestigation.org",
         )
         db.session.add(record)
+        existing_keys.add(key)
         count += 1
 
     db.session.commit()
@@ -161,37 +195,41 @@ def import_huggingface_dataset(db, batch_size=100, max_docs=None):
     25,800 OCR'd documents from the House Oversight Committee release.
 
     Tries multiple download methods:
-      1. Direct CSV download (with ?download=true)
+      1. Streaming CSV download (avoids loading full file into memory)
       2. Parquet via HF datasets library
       3. Bulk fetch from epsteininvestigation.org API as last resort
     """
-    from app.models import Document
-
-    # The ?download=true parameter is required for HF LFS-hosted files
     HF_URLS = [
         "https://huggingface.co/datasets/tensonaut/EPSTEIN_FILES_20K/resolve/main/EPS_FILES_20K_NOV2025.csv?download=true",
         "https://huggingface.co/datasets/tensonaut/EPSTEIN_FILES_20K/resolve/main/EPS_FILES_20K_NOV2025.csv",
     ]
 
-    # Method 1: Direct CSV download
+    # Method 1: Streaming CSV download
     for url in HF_URLS:
-        logger.info(f"Trying direct download: {url[:80]}...")
+        logger.info(f"Trying streaming download: {url[:80]}...")
         try:
             resp = requests.get(
                 url, timeout=300, stream=True,
                 headers={"User-Agent": "epstein-files-search/1.0"},
             )
-            if resp.status_code == 200 and len(resp.content) > 1000:
-                text = resp.content.decode("utf-8", errors="replace")
-                if "filename" in text[:200] and "text" in text[:200]:
-                    count = _ingest_csv_text(db, text, batch_size, max_docs)
+            if resp.status_code == 200:
+                lines = (
+                    line.decode("utf-8", errors="replace")
+                    for line in resp.iter_lines()
+                )
+                reader = csv.DictReader(lines)
+                fieldnames = reader.fieldnames or []
+                if "filename" in fieldnames and "text" in fieldnames:
+                    count = _ingest_csv_rows(db, reader, batch_size, max_docs)
                     if count > 0:
                         return count
                     logger.warning("CSV parsed but 0 docs imported")
+                else:
+                    logger.warning(f"Unexpected CSV format, fields: {fieldnames}")
             else:
                 logger.warning(f"HF download returned {resp.status_code}")
         except Exception as e:
-            logger.warning(f"Direct download failed: {e}")
+            logger.warning(f"Streaming download failed: {e}")
 
     # Method 2: HF datasets library
     count = _import_hf_via_library(db, batch_size, max_docs)
@@ -203,15 +241,17 @@ def import_huggingface_dataset(db, batch_size=100, max_docs=None):
     return _import_via_api_bulk(db, batch_size, max_docs or Config.BULK_IMPORT_MAX_DOCS)
 
 
-def _ingest_csv_text(db, csv_text, batch_size=100, max_docs=None):
-    """Parse CSV text and import documents."""
+def _ingest_csv_rows(db, rows, batch_size=100, max_docs=None):
+    """Ingest documents from an iterable of CSV row dicts."""
     from app.models import Document
+
+    # Pre-load existing file_ids to avoid N+1 duplicate checks
+    existing_ids = {r[0] for r in db.session.query(Document.file_id).all()}
 
     count = 0
     skipped = 0
-    reader = csv.DictReader(io.StringIO(csv_text))
 
-    for row in reader:
+    for row in rows:
         if max_docs and count >= max_docs:
             break
 
@@ -223,13 +263,11 @@ def _ingest_csv_text(db, csv_text, batch_size=100, max_docs=None):
             continue
 
         file_id = _filename_to_file_id(filename)
-        content_hash = hashlib.sha256(text[:2000].encode()).hexdigest()[:32]
-
-        existing = Document.query.filter_by(file_id=file_id).first()
-        if existing:
+        if file_id in existing_ids:
             skipped += 1
             continue
 
+        content_hash = hashlib.sha256(text[:2000].encode()).hexdigest()[:32]
         doc = Document(
             file_id=file_id,
             title=file_id,
@@ -241,6 +279,7 @@ def _ingest_csv_text(db, csv_text, batch_size=100, max_docs=None):
             processed=False,
         )
         db.session.add(doc)
+        existing_ids.add(file_id)
         count += 1
 
         if count % batch_size == 0:
@@ -250,7 +289,7 @@ def _ingest_csv_text(db, csv_text, batch_size=100, max_docs=None):
 
     db.session.commit()
     _update_fts_batch(db, count % batch_size or batch_size)
-    logger.info(f"Imported {count} documents from HF CSV ({skipped} skipped)")
+    logger.info(f"Imported {count} documents from CSV ({skipped} skipped)")
     return count
 
 
@@ -271,6 +310,9 @@ def _import_hf_via_library(db, batch_size=100, max_docs=None):
         logger.warning(f"datasets library failed: {e}")
         return 0
 
+    # Pre-load existing file_ids to avoid N+1 duplicate checks
+    existing_ids = {r[0] for r in db.session.query(Document.file_id).all()}
+
     count = 0
     skipped = 0
     for row in ds:
@@ -284,8 +326,7 @@ def _import_hf_via_library(db, batch_size=100, max_docs=None):
             continue
 
         file_id = _filename_to_file_id(filename)
-        existing = Document.query.filter_by(file_id=file_id).first()
-        if existing:
+        if file_id in existing_ids:
             skipped += 1
             continue
 
@@ -298,6 +339,7 @@ def _import_hf_via_library(db, batch_size=100, max_docs=None):
             processed=False,
         )
         db.session.add(doc)
+        existing_ids.add(file_id)
         count += 1
 
         if count % batch_size == 0:
@@ -454,7 +496,8 @@ def _enrich_from_search(db, api_base, term, max_pages=5):
                     enriched += 1
 
             db.session.commit()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Enrichment failed for term '{term}' page {page}: {e}")
             db.session.rollback()
             break
 
@@ -483,16 +526,18 @@ def import_all_archive_csvs(db):
     return results
 
 
-def _get_or_create_entity(db, name, etype="PERSON"):
+def _get_or_create_entity(db, name, etype="PERSON", cache=None):
     from app.models import Entity
+    if cache is not None:
+        if name in cache:
+            return cache[name]
+        entity = Entity(name=name, canonical_name=name, entity_type=etype, mention_count=0)
+        db.session.add(entity)
+        cache[name] = entity
+        return entity
     entity = Entity.query.filter_by(name=name).first()
     if not entity:
-        entity = Entity(
-            name=name,
-            canonical_name=name,
-            entity_type=etype,
-            mention_count=0,
-        )
+        entity = Entity(name=name, canonical_name=name, entity_type=etype, mention_count=0)
         db.session.add(entity)
     return entity
 
