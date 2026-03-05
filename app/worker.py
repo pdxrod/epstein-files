@@ -15,7 +15,9 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+
+from sqlalchemy import and_, or_
 
 from config import Config
 
@@ -40,6 +42,19 @@ CATEGORY_DISCOVERY_BATCH = Config.CATEGORY_DISCOVERY_BATCH
 ANALYSIS_DELAY = Config.WORKER_ANALYSIS_DELAY
 FETCH_DELAY = Config.WORKER_FETCH_DELAY
 FETCH_BATCH_SIZE = Config.WORKER_FETCH_BATCH
+
+_SEARCH_TERMS = [
+    "trafficking victim", "Ghislaine Maxwell", "abuse minor",
+    "flight log passenger", "deposition testimony",
+    "financial transfer wire", "blackmail recording",
+    "Prince Andrew", "Les Wexner", "Palm Beach police",
+    "Virginia Roberts", "massage", "young girls",
+    "Jean-Luc Brunel", "Little St James", "plea deal",
+    "Sarah Kellen", "Nadia Marcinkova",
+    "cover up obstruction", "intelligence agency",
+    "shell company trust", "pilot manifest",
+    "house oversight committee", "FBI interview",
+]
 
 
 def get_worker_status() -> dict:
@@ -68,7 +83,7 @@ def start_worker(app):
 
     with _status_lock:
         _worker_status["running"] = True
-        _worker_status["started_at"] = datetime.utcnow().isoformat()
+        _worker_status["started_at"] = datetime.now(timezone.utc).isoformat()
         _worker_status["current_task"] = "starting"
 
     logger.info("Background AI worker started")
@@ -242,23 +257,11 @@ def _phase_fetch_and_analyse(db, Document, Category, analyse_document,
     recent_summaries = []
     known_cats = [c.name for c in Category.query.all()]
     search_page = 1
-    search_terms = [
-        "trafficking victim", "Ghislaine Maxwell", "abuse minor",
-        "flight log passenger", "deposition testimony",
-        "financial transfer wire", "blackmail recording",
-        "Prince Andrew", "Les Wexner", "Palm Beach police",
-        "Virginia Roberts", "massage", "young girls",
-        "Jean-Luc Brunel", "Little St James", "plea deal",
-        "Sarah Kellen", "Nadia Marcinkova",
-        "cover up obstruction", "intelligence agency",
-        "shell company trust", "pilot manifest",
-        "house oversight committee", "FBI interview",
-    ]
     search_idx = 0
 
     while not _worker_stop.is_set():
         try:
-            term = search_terms[search_idx % len(search_terms)]
+            term = _SEARCH_TERMS[search_idx % len(_SEARCH_TERMS)]
             _update_status(current_task=f"fetching: {term} (page {search_page})")
 
             ext_results = search_external(term, page=search_page, limit=FETCH_BATCH_SIZE)
@@ -296,20 +299,19 @@ def _phase_fetch_and_analyse(db, Document, Category, analyse_document,
                 )
 
                 if analysis:
-                    _store_analysis_from_external(db, doc_data, analysis)
+                    _store_analysis_from_external(db, doc_data, analysis, existing=existing)
                     analyses_since_discovery += 1
-                    _record_analysis(file_id, analysis, [])
+                    _record_analysis(file_id, analysis, recent_summaries)
 
                     for new_cat in analysis.get("new_categories", []):
                         _ensure_ai_category(db, new_cat)
 
                 time.sleep(ANALYSIS_DELAY)
 
-            if analyses_since_discovery >= CATEGORY_DISCOVERY_BATCH:
-                _run_category_discovery(db, known_cats,
-                                        get_worker_status()["recent_analyses"],
-                                        discover_categories)
+            if analyses_since_discovery >= CATEGORY_DISCOVERY_BATCH and recent_summaries:
+                _run_category_discovery(db, known_cats, recent_summaries, discover_categories)
                 analyses_since_discovery = 0
+                recent_summaries = []
                 known_cats = [c.name for c in Category.query.all()]
 
             if len(docs) < FETCH_BATCH_SIZE:
@@ -329,7 +331,6 @@ def _phase_fetch_and_analyse(db, Document, Category, analyse_document,
 def _apply_analysis_to_doc(db, doc, analysis):
     """Apply AI analysis results to an existing Document object."""
     from app.models import Entity, Category
-    from sqlalchemy import and_, or_
 
     doc.relevance_score = analysis.get("relevance_score", 0)
     doc.relevance_categories = json.dumps(
@@ -377,16 +378,26 @@ def _apply_analysis_to_doc(db, doc, analysis):
                 doc.entities.append(entity)
 
     all_cats = analysis.get("categories", []) + analysis.get("new_categories", [])
+    cat_slugs = []
     for cat_name in all_cats:
         if not cat_name or not isinstance(cat_name, str):
             continue
         slug = re.sub(r"[^a-z0-9]+", "-", cat_name.lower()).strip("-")
-        if not slug:
-            continue
-        cat = Category.query.filter_by(slug=slug).first()
-        if cat and cat not in doc.categories:
-            doc.categories.append(cat)
-            cat.document_count = (cat.document_count or 0) + 1
+        if slug:
+            cat_slugs.append(slug)
+
+    if cat_slugs:
+        cat_map = {
+            c.slug: c
+            for c in Category.query.filter(Category.slug.in_(cat_slugs)).all()
+        }
+        doc_cat_ids = {c.id for c in doc.categories}
+        for slug in cat_slugs:
+            cat = cat_map.get(slug)
+            if cat and cat.id not in doc_cat_ids:
+                doc.categories.append(cat)
+                doc_cat_ids.add(cat.id)
+                cat.document_count = (cat.document_count or 0) + 1
 
     try:
         db.session.commit()
@@ -396,12 +407,14 @@ def _apply_analysis_to_doc(db, doc, analysis):
         db.session.rollback()
 
 
-def _store_analysis_from_external(db, doc_data: dict, analysis: dict):
+def _store_analysis_from_external(db, doc_data: dict, analysis: dict,
+                                   existing=None):
     """Store an AI analysis result from an external API document."""
     from app.models import Document
 
     file_id = doc_data.get("file_id", "unknown")
-    existing = Document.query.filter_by(file_id=file_id).first()
+    if existing is None:
+        existing = Document.query.filter_by(file_id=file_id).first()
 
     if existing:
         doc = existing
