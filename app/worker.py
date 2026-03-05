@@ -44,7 +44,9 @@ FETCH_BATCH_SIZE = Config.WORKER_FETCH_BATCH
 
 def get_worker_status() -> dict:
     with _status_lock:
-        return dict(_worker_status)
+        status = dict(_worker_status)
+        status["recent_analyses"] = list(_worker_status["recent_analyses"])
+        return status
 
 
 def start_worker(app):
@@ -174,6 +176,7 @@ def _phase_analyse_local(db, Document, Category, analyse_document, discover_cate
     analyses_since_discovery = 0
     recent_summaries = []
     processed_count = 0
+    known_cats = [c.name for c in Category.query.all()]
 
     while not _worker_stop.is_set():
         batch = (
@@ -185,8 +188,6 @@ def _phase_analyse_local(db, Document, Category, analyse_document, discover_cate
         )
         if not batch:
             break
-
-        known_cats = [c.name for c in Category.query.all()]
 
         for doc in batch:
             if _worker_stop.is_set():
@@ -227,6 +228,7 @@ def _phase_analyse_local(db, Document, Category, analyse_document, discover_cate
             _run_category_discovery(db, known_cats, recent_summaries, discover_categories)
             analyses_since_discovery = 0
             recent_summaries = []
+            known_cats = [c.name for c in Category.query.all()]
 
     logger.info(f"Phase 2 complete: {processed_count} documents analysed")
 
@@ -238,6 +240,7 @@ def _phase_fetch_and_analyse(db, Document, Category, analyse_document,
 
     analyses_since_discovery = 0
     recent_summaries = []
+    known_cats = [c.name for c in Category.query.all()]
     search_page = 1
     search_terms = [
         "trafficking victim", "Ghislaine Maxwell", "abuse minor",
@@ -266,8 +269,6 @@ def _phase_fetch_and_analyse(db, Document, Category, analyse_document,
                 search_page = 1
                 time.sleep(FETCH_DELAY)
                 continue
-
-            known_cats = [c.name for c in Category.query.all()]
 
             for doc_data in docs:
                 if _worker_stop.is_set():
@@ -306,9 +307,10 @@ def _phase_fetch_and_analyse(db, Document, Category, analyse_document,
 
             if analyses_since_discovery >= CATEGORY_DISCOVERY_BATCH:
                 _run_category_discovery(db, known_cats,
-                                        _worker_status.get("recent_analyses", []),
+                                        get_worker_status()["recent_analyses"],
                                         discover_categories)
                 analyses_since_discovery = 0
+                known_cats = [c.name for c in Category.query.all()]
 
             if len(docs) < FETCH_BATCH_SIZE:
                 search_idx += 1
@@ -327,6 +329,7 @@ def _phase_fetch_and_analyse(db, Document, Category, analyse_document,
 def _apply_analysis_to_doc(db, doc, analysis):
     """Apply AI analysis results to an existing Document object."""
     from app.models import Entity, Category
+    from sqlalchemy import and_, or_
 
     doc.relevance_score = analysis.get("relevance_score", 0)
     doc.relevance_categories = json.dumps(
@@ -336,25 +339,42 @@ def _apply_analysis_to_doc(db, doc, analysis):
     doc.ai_connections = analysis.get("connections", "")
     doc.processed = True
 
-    for ent_data in analysis.get("entities", []):
-        ent_name = ent_data.get("name", "").strip()
-        ent_type = ent_data.get("type", "PERSON").upper()
-        if not ent_name or len(ent_name) < 2:
-            continue
+    ent_data_list = [
+        ed for ed in analysis.get("entities", [])
+        if ed.get("name", "").strip() and len(ed.get("name", "").strip()) >= 2
+    ]
 
-        entity = Entity.query.filter_by(name=ent_name, entity_type=ent_type).first()
-        if not entity:
-            entity = Entity(
-                name=ent_name, canonical_name=ent_name,
-                entity_type=ent_type,
-                description=ent_data.get("role", ""),
-                mention_count=1,
+    if ent_data_list:
+        conditions = [
+            and_(
+                Entity.name == ed["name"].strip(),
+                Entity.entity_type == ed.get("type", "PERSON").upper(),
             )
-            db.session.add(entity)
-        else:
-            entity.mention_count = (entity.mention_count or 0) + 1
-        if entity not in doc.entities:
-            doc.entities.append(entity)
+            for ed in ent_data_list
+        ]
+        entity_cache = {
+            (e.name, e.entity_type): e
+            for e in Entity.query.filter(or_(*conditions)).all()
+        }
+
+        for ent_data in ent_data_list:
+            ent_name = ent_data["name"].strip()
+            ent_type = ent_data.get("type", "PERSON").upper()
+
+            entity = entity_cache.get((ent_name, ent_type))
+            if not entity:
+                entity = Entity(
+                    name=ent_name, canonical_name=ent_name,
+                    entity_type=ent_type,
+                    description=ent_data.get("role", ""),
+                    mention_count=1,
+                )
+                db.session.add(entity)
+                entity_cache[(ent_name, ent_type)] = entity
+            else:
+                entity.mention_count = (entity.mention_count or 0) + 1
+            if entity not in doc.entities:
+                doc.entities.append(entity)
 
     all_cats = analysis.get("categories", []) + analysis.get("new_categories", [])
     for cat_name in all_cats:
@@ -424,7 +444,6 @@ def _run_category_discovery(db, known_cats, recent_summaries, discover_categorie
 
     new_cats = discover_categories(recent_summaries, known_cats)
     for cat_data in new_cats:
-        name = cat_data if isinstance(cat_data, str) else cat_data.get("name", "")
         _ensure_ai_category(db, cat_data)
         with _status_lock:
             _worker_status["categories_discovered"] += 1
@@ -448,7 +467,8 @@ def _update_fts(db, doc):
             },
         )
         db.session.commit()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"FTS update failed for doc {doc.id}: {e}")
         db.session.rollback()
 
 
@@ -484,5 +504,6 @@ def _ensure_ai_category(db, name_or_data):
         try:
             db.session.commit()
             logger.info(f"New AI category discovered: {name}")
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to create category '{name}': {e}")
             db.session.rollback()
