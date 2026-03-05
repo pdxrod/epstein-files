@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import urljoin
@@ -45,6 +46,15 @@ from app.nlp import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Precompiled regexes — avoids per-call compilation
+_RE_EFTA_ID       = re.compile(r"(EFTA\d+)", re.IGNORECASE)
+_RE_SUBJECT_PREFIX = re.compile(r"^(re|fw|fwd)\s*:\s*", re.IGNORECASE)
+
+# Module-level marker tuples for _classify_type — avoids per-call list construction
+_EMAIL_MARKERS  = ("from:", "to:", "subject:", "sent:", "date:")
+_LEGAL_MARKERS  = ("deposition", "testimony", "q.", "a.", "the witness")
+_FLIGHT_MARKERS = ("flight", "passenger", "tail number", "departure", "arrival")
 
 DOJ_VOLUMES = {
     f"vol{str(i).zfill(5)}": f"https://www.justice.gov/epstein/files/DataSet%20{i}/"
@@ -198,7 +208,7 @@ class DOJScraper:
 
     @staticmethod
     def _extract_file_id(url: str) -> str:
-        match = re.search(r"(EFTA\d+)", url, re.IGNORECASE)
+        match = _RE_EFTA_ID.search(url)
         if match:
             return match.group(1)
         basename = os.path.basename(url).replace(".pdf", "").replace("%20", "_")
@@ -370,26 +380,24 @@ class DocumentProcessor:
             return metadata["doc_type"]
 
         text_lower = text[:2000].lower()
-        if any(
-            marker in text_lower
-            for marker in ["from:", "to:", "subject:", "sent:", "date:"]
-        ):
+        if any(marker in text_lower for marker in _EMAIL_MARKERS):
             if text_lower.count("from:") >= 1 and text_lower.count("to:") >= 1:
                 return "email"
-        if any(
-            marker in text_lower
-            for marker in ["deposition", "testimony", "q.", "a.", "the witness"]
-        ):
+        if any(marker in text_lower for marker in _LEGAL_MARKERS):
             return "legal"
-        if any(
-            marker in text_lower
-            for marker in ["flight", "passenger", "tail number", "departure", "arrival"]
-        ):
+        if any(marker in text_lower for marker in _FLIGHT_MARKERS):
             return "flight_log"
         return "document"
 
     def _handle_embedded_emails(self, parent_doc: Document, quoted_emails: list[str]):
         """Store embedded/quoted emails as linked child documents."""
+        # Single query to pre-fetch all existing child file_ids for this parent
+        existing_child_ids: set[str] = {
+            row[0] for row in db.session.query(Document.file_id).filter(
+                Document.file_id.like(f"{parent_doc.file_id}_emb_%")
+            ).all()
+        }
+
         for i, quoted_text in enumerate(quoted_emails):
             if not quoted_text or len(quoted_text) < 30:
                 continue
@@ -414,7 +422,7 @@ class DocumentProcessor:
                 continue
 
             child_file_id = f"{parent_doc.file_id}_emb_{i}"
-            if Document.query.filter_by(file_id=child_file_id).first():
+            if child_file_id in existing_child_ids:
                 continue
 
             email_data = parse_email(quoted_text)
@@ -492,11 +500,9 @@ class ThreadBuilder:
             .all()
         )
 
-        subject_groups = {}
+        subject_groups: dict[str, list] = defaultdict(list)
         for email in emails:
             normalised = self._normalise_subject(email.subject)
-            if normalised not in subject_groups:
-                subject_groups[normalised] = []
             subject_groups[normalised].append(email)
 
         for subject, group in subject_groups.items():
@@ -529,20 +535,18 @@ class ThreadBuilder:
 
     @staticmethod
     def _normalise_subject(subject: str) -> str:
-        cleaned = re.sub(r"^(re|fw|fwd)\s*:\s*", "", subject.strip(), flags=re.IGNORECASE)
+        cleaned = _RE_SUBJECT_PREFIX.sub("", subject.strip())
         cleaned = re.sub(r"\s+", " ", cleaned.lower().strip())
         return cleaned
 
 
 def _ensure_name_variant(variant: str, canonical: str):
-    existing = NameVariant.query.filter_by(variant=variant, canonical=canonical).first()
-    if not existing:
-        nv = NameVariant(
-            variant=variant,
-            canonical=canonical,
-            similarity_score=1.0,
+    # UniqueConstraint("variant", "canonical") makes OR IGNORE safe and avoids a SELECT round-trip
+    db.session.execute(
+        NameVariant.__table__.insert().prefix_with("OR IGNORE").values(
+            variant=variant, canonical=canonical, similarity_score=1.0
         )
-        db.session.add(nv)
+    )
 
 
 def ingest_local_pdfs(directory: str, source: str = "local"):
